@@ -108,12 +108,34 @@ lower inode for real files, a hash for virtual ones) and implements
 
 * A FUSE mount nested under another export is **not** visible to clients
   unless it has its own entry in `/etc/exports` with an explicit `fsid=`.
-* After the daemon restarts, NFS clients may see `ESTALE` for handles they
-  already held until they re-lookup; remounting the client is the reliable fix.
-  The daemon re-resolves handles by walking the tree, which is slow on very
+* Daemon restart: tested with the in-kernel NFS server (NFSv3 client holding
+  an open file). After `kill -9` of the daemon, un-exporting, starting a new
+  daemon on the same mount point and exporting it again with the **same
+  `fsid`**, reads through the old file handle succeeded. The new daemon
+  received `LOOKUP <nodeid> "."` for both a virtual CBZ and a real directory
+  and resolved them through `LookupNode`. The export must be re-established
+  after the new mount appears (`exportfs -r`, or un-export and export); leaving
+  the old export in place was not tested. `LookupNode` finds an ID by walking
+  the lower tree (and indexing the PDFs on the way), which is slow on very
   large trees.
 * Virtual node IDs change when the PDF's size or mtime changes (the
   generation number changes too), as NFS requires.
+
+## Measured
+
+aarch64 router (4 cores, ~900 MB free RAM), spinning/slow disk, Go 1.27 static
+binary:
+
+| Case | Result |
+| --- | --- |
+| 1.4 GB, 4141-page JPEG PDF, 200 pages/part | 21 parts of 51-89 MB. Peak RSS 12 MB after indexing, 27 MB after reading all 1.4 GB. |
+| Cold first listing of that PDF | ~30 s: ~8300 random 4 KB reads (page and image dictionaries sit between the image streams) at ~4 ms each. Warm: instant. Disabling readahead and reading in parallel did not help on this disk. |
+| First open of a part (CRC pass) | ~1 s for 200 JPEGs |
+| 36 MB, 189-page 4-bit indexed Flate PDF | one 91 MB CBZ of PNGs; ~6 s for the first open (decode + CRC of every page), then cached while the process lives |
+| Correctness | every JPEG of part 1 and every PNG's rows + palette matched pypdf's extraction (sha256) |
+
+Indexes and CRCs live in memory only, so each process start pays the cold
+indexing cost once per PDF.
 
 ## Limitations
 
