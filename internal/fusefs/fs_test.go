@@ -3,6 +3,8 @@ package fusefs_test
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -167,4 +169,27 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestFlatePDFBecomesPNGPages(t *testing.T) {
+	lower, mnt := mountTest(t, view.Config{})
+	pdf, err := os.ReadFile("../pdfidx/testdata/plain-raw.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(lower, "scan.pdf"), pdf, 0o644)
+	zr := readZip(t, filepath.Join(mnt, "scan.cbz"))
+	if len(zr.File) != 3 {
+		t.Fatalf("entries = %d", len(zr.File))
+	}
+	for i, f := range zr.File {
+		if want := fmt.Sprintf("000%d.png", i+1); f.Name != want {
+			t.Fatalf("entry %d is %q, want %q", i, f.Name, want)
+		}
+		rc, _ := f.Open()
+		if _, err := png.Decode(rc); err != nil {
+			t.Fatalf("%s is not a valid PNG: %v", f.Name, err)
+		}
+		rc.Close()
+	}
 }

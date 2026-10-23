@@ -4,3 +4,8 @@
 each). The `enc-*.pdf` files are that PDF re-written and encrypted by pypdf
 (an independent implementation), with user password `user-pw` and owner
 password `owner-pw`; the `*-emptyuser` variants have an empty user password.
+
+`plain-raw.pdf` has three Flate-compressed raw images (4-bit indexed, 8-bit
+RGB, 1-bit gray); `encraw-*.pdf` are its pypdf-encrypted variants (user
+password `user-pw`), used to check PNG synthesis from encrypted streams and
+palette strings.

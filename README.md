@@ -5,16 +5,26 @@ file(s), built on the fly. Everything else in the directory is mirrored
 unchanged (reads **and** writes). Made so a comic server such as Kavita can
 read PDF scans as proper comic archives without keeping a second copy on disk.
 
-A PDF is convertible when every page holds exactly one JPEG (`DCTDecode`)
-image, which is the usual shape of scanned books and comics. The JPEG
-streams are copied out **losslessly** into an uncompressed (STORED) zip, so
-there is no re-encoding and almost no CPU use. Sizes are known up front, reads
+A PDF is convertible when every page holds exactly one image, which is the
+usual shape of scanned books and comics:
+
+* **JPEG** (`DCTDecode`) pages are copied out byte for byte (`0001.jpg`, ...):
+  no re-encoding and almost no CPU use.
+* **Flate raw-sample** pages (1/2/4/8-bit gray, 8-bit RGB, or Indexed palettes
+  over those; ICCBased with N=1/3) are wrapped losslessly into a PNG
+  (`0001.png`, ...) with the original bit depth and palette. The PNG uses
+  stored (uncompressed) deflate blocks, so its size is known exactly from the
+  image geometry without decoding anything, and pages are only decoded when
+  read.
+
+The archive is an uncompressed (STORED) zip. Sizes are known up front, reads
 work at any offset, and CRC32s are computed lazily the first time an archive's
 headers are needed.
 
-Anything else (text PDFs, pages with several images, CMYK/`/Decode` images,
-other image filters, damaged files, wrong or missing password) is **passed
-through untouched** as a normal `.pdf`.
+Anything else (text/layered PDFs, pages with several images, CMYK or `/Decode`
+images, alpha/`/SMask`, JPEG 2000, 16-bit, other filters, damaged files, wrong
+or missing password) is **passed through untouched** as a normal `.pdf`. Run
+with `-v` to see why a given PDF was passed through.
 
 ## Presentation
 
@@ -73,7 +83,10 @@ lower inode for real files, a hash for virtual ones) and implements
 
 ## Limitations
 
-* Pages are not re-rendered: no text PDFs, no layered pages.
+* Pages are not re-rendered: no text PDFs, no layered pages. PNG pages are not
+  compressed (a 4-bit scan becomes roughly 2x the size of the PDF's Flate
+  stream); that is the price of exact sizes without decoding.
+* ICC profiles are not carried into the PNG.
 * A part larger than 4 GiB or with more than 65535 images (ZIP64) is not
   generated; use a smaller `--pages-per-cbz`.
 * Chapter boundaries are not recoverable from a PDF; parts are fixed-size

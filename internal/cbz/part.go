@@ -59,15 +59,19 @@ type Part struct {
 	tail []byte
 }
 
-// NewPart lays out an archive of images. pages are indexes understood by src
-// and sizes their (decrypted) lengths.
-func NewPart(src ImageSource, pages []int, sizes []int64, info *Info, mod time.Time) (*Part, error) {
-	if len(pages) != len(sizes) {
-		return nil, errors.New("cbz: pages/sizes mismatch")
-	}
+// Img is one image of the archive: its index in the ImageSource, its length
+// and the file extension to name it with ("jpg", "png").
+type Img struct {
+	Page int
+	Size int64
+	Ext  string
+}
+
+// NewPart lays out an archive of images.
+func NewPart(src ImageSource, imgs []Img, info *Info, mod time.Time) (*Part, error) {
 	p := &Part{src: src}
 	p.dosTime, p.dosDate = dosTimeDate(mod)
-	width := len(fmt.Sprint(len(pages)))
+	width := len(fmt.Sprint(len(imgs)))
 	if width < 4 {
 		width = 4
 	}
@@ -75,8 +79,12 @@ func NewPart(src ImageSource, pages []int, sizes []int64, info *Info, mod time.T
 		x := comicInfo(info)
 		p.entries = append(p.entries, entry{name: "ComicInfo.xml", inline: x, size: int64(len(x))})
 	}
-	for i, pg := range pages {
-		p.entries = append(p.entries, entry{name: fmt.Sprintf("%0*d.jpg", width, i+1), page: pg, size: sizes[i]})
+	for i, im := range imgs {
+		ext := im.Ext
+		if ext == "" {
+			ext = "jpg"
+		}
+		p.entries = append(p.entries, entry{name: fmt.Sprintf("%0*d.%s", width, i+1, ext), page: im.Page, size: im.Size})
 	}
 	if len(p.entries) > maxEntries {
 		return nil, ErrTooBig

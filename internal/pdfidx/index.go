@@ -15,6 +15,9 @@ type Page struct {
 	Size int64 // length of the JPEG after decryption
 	Num  int   // object number / generation, for the per-object key
 	Gen  int
+	Ext  string // "jpg" (embedded JPEG) or "png" (synthesised from raw samples)
+
+	png *pngSpec
 }
 
 // Index is the result of scanning a PDF. It is safe for concurrent use.
@@ -26,6 +29,7 @@ type Index struct {
 }
 
 // Encrypted reports whether image reads go through a decryption step.
+// (PNG pages are synthesised for every document, encrypted or not.)
 func (x *Index) Encrypted() bool { return x.crypt != nil && !x.crypt.identity() }
 
 // Open scans the PDF. passwords are tried (as user, then owner password) after
@@ -136,18 +140,20 @@ func (w *walker) page(pd dict, res any) error {
 	if name2(id["Subtype"]) != "Image" {
 		return unsupported("page %d: XObject is not an image", n)
 	}
-	names, _, err := w.d.filters(id)
+	names, parms, err := w.d.filters(id)
 	if err != nil {
 		return err
 	}
-	if len(names) != 1 || (names[0] != "DCTDecode" && names[0] != "DCT") {
-		return unsupported("page %d: image filter %v is not DCTDecode", n, names)
+	if len(names) != 1 {
+		return unsupported("page %d: image filters %v", n, names)
 	}
 	if _, ok := id["Decode"]; ok {
 		return unsupported("page %d: image has /Decode", n)
 	}
-	if cs, ok := id["ColorSpace"].(name); ok && cs == "DeviceCMYK" {
-		return unsupported("page %d: CMYK JPEG", n)
+	for _, k := range []string{"SMask", "Mask", "ImageMask"} {
+		if v, ok := id[k]; ok && v != false {
+			return unsupported("page %d: image has /%s", n, k)
+		}
 	}
 	l, err := w.d.streamLength(id)
 	if err != nil {
@@ -156,15 +162,29 @@ func (w *walker) page(pd dict, res any) error {
 	if so+l > w.d.size {
 		return unsupported("page %d: stream past end of file", n)
 	}
-	size := l
-	if w.d.crypt != nil {
-		size, err = w.d.crypt.plainSize(w.d.r, iref.num, gen, so, l)
-		if err != nil {
-			return err
+	switch names[0] {
+	case "DCTDecode", "DCT":
+		if cs, ok := id["ColorSpace"].(name); ok && cs == "DeviceCMYK" {
+			return unsupported("page %d: CMYK JPEG", n)
 		}
+		size := l
+		if w.d.crypt != nil {
+			size, err = w.d.crypt.plainSize(w.d.r, iref.num, gen, so, l)
+			if err != nil {
+				return err
+			}
+		}
+		w.x.Pages = append(w.x.Pages, Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"})
+		return nil
+	case "FlateDecode", "Fl":
+		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0])
+		if err != nil {
+			return unsupported("page %d: %v", n, err)
+		}
+		w.x.Pages = append(w.x.Pages, Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec})
+		return nil
 	}
-	w.x.Pages = append(w.x.Pages, Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen})
-	return nil
+	return unsupported("page %d: image filter %s", n, names[0])
 }
 
 // ReadImageAt reads the JPEG of page at offset off, like io.ReaderAt.
@@ -173,7 +193,7 @@ func (x *Index) ReadImageAt(r io.ReaderAt, page int, p []byte, off int64) (int, 
 	if off >= pg.Size {
 		return 0, io.EOF
 	}
-	if !x.Encrypted() {
+	if !x.Encrypted() && pg.png == nil {
 		want := int64(len(p))
 		short := false
 		if want > pg.Size-off {
@@ -208,12 +228,27 @@ func (x *Index) image(r io.ReaderAt, page int) ([]byte, error) {
 	if _, err := r.ReadAt(raw, pg.Off); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
-	b, err := x.crypt.decryptStream(pg.Num, pg.Gen, raw)
-	if err != nil {
-		return nil, err
+	var err error
+	if x.crypt != nil {
+		if raw, err = x.crypt.decryptStream(pg.Num, pg.Gen, raw); err != nil {
+			return nil, err
+		}
 	}
-	x.cache.put(page, b)
-	return b, nil
+	if pg.png != nil {
+		rows, err := pg.png.decodeRaw(raw)
+		if err != nil {
+			return nil, err
+		}
+		raw, err = pg.png.buildPNG(rows)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(raw)) != pg.Size {
+			return nil, fmt.Errorf("pdfidx: PNG size %d, expected %d", len(raw), pg.Size)
+		}
+	}
+	x.cache.put(page, raw)
+	return raw, nil
 }
 
 // imgCache is a byte-bounded LRU of decrypted images.

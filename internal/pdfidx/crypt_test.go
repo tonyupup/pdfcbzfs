@@ -115,3 +115,28 @@ func TestEncryptedRandomAccess(t *testing.T) {
 		}
 	}
 }
+
+// Encrypted Flate images (with an encrypted /Indexed palette string) must
+// produce exactly the PNGs the unencrypted file produces.
+func TestEncryptedFlateImagesBecomeSamePNG(t *testing.T) {
+	plain := fixture(t, "plain-raw.pdf")
+	want := pageBytes(t, plain, open(t, plain))
+	if len(want) != 3 {
+		t.Fatalf("plain-raw has %d pages", len(want))
+	}
+	for _, f := range []string{"encraw-rc4-128.pdf", "encraw-aes-128.pdf", "encraw-aes-256.pdf"} {
+		t.Run(f, func(t *testing.T) {
+			pdf := fixture(t, f)
+			x := open(t, pdf, []byte("user-pw"))
+			got := pageBytes(t, pdf, x)
+			for i := range want {
+				if x.Pages[i].Ext != "png" {
+					t.Fatalf("page %d ext %q", i, x.Pages[i].Ext)
+				}
+				if !bytes.Equal(got[i], want[i]) {
+					t.Fatalf("page %d: PNG differs from the unencrypted file's PNG", i)
+				}
+			}
+		})
+	}
+}

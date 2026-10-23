@@ -190,17 +190,15 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 		if last > n {
 			last = n
 		}
-		pages := make([]int, 0, last-first)
-		sizes := make([]int64, 0, last-first)
+		imgs := make([]cbz.Img, 0, last-first)
 		for i := first; i < last; i++ {
-			pages = append(pages, i)
-			sizes = append(sizes, idx.Pages[i].Size)
+			imgs = append(imgs, cbz.Img{Page: i, Size: idx.Pages[i].Size, Ext: idx.Pages[i].Ext})
 		}
 		var info *cbz.Info
 		if p.Folder {
 			info = &cbz.Info{Series: stem, Number: part}
 		}
-		cp, err := cbz.NewPart(idx, pages, sizes, info, p.Mod)
+		cp, err := cbz.NewPart(idx, imgs, info, p.Mod)
 		if err != nil {
 			return nil, err
 		}

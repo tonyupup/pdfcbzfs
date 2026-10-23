@@ -285,3 +285,35 @@ func deflate(b []byte) []byte {
 	w.Close()
 	return out.Bytes()
 }
+
+// Raw describes a Flate-compressed raw-sample image. Rows are packed and
+// padded to a byte boundary, like in a PDF image stream.
+type Raw struct {
+	W, H, Bpc  int
+	ColorSpace string // PDF colour space, e.g. "/DeviceGray" or "[/Indexed /DeviceRGB 15 <...>]"
+	Rows       []byte // H * rowBytes
+}
+
+// RawImage makes a deterministic image of the given shape.
+func RawImage(seed, w, h, bpc int, cs string, colors int) Raw {
+	rowBytes := (w*colors*bpc + 7) / 8
+	rows := make([]byte, h*rowBytes)
+	for i := range rows {
+		rows[i] = byte(i*31 + seed*17 + i/rowBytes)
+	}
+	return Raw{W: w, H: h, Bpc: bpc, ColorSpace: cs, Rows: rows}
+}
+
+// ClassicRaw builds a classic-xref PDF with one Flate image per page.
+func ClassicRaw(imgs []Raw) []byte {
+	n := len(imgs)
+	b := newBuilder()
+	l := plan(n, Opts{})
+	b.writeTree(l, Opts{}, n)
+	for i, im := range imgs {
+		b.obj(l.pageObj[i], pageBody(2, l.imgObj[i], false))
+		b.stream(l.imgObj[i], fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s /BitsPerComponent %d /Filter /FlateDecode",
+			im.W, im.H, im.ColorSpace, im.Bpc), deflate(im.Rows), 0)
+	}
+	return b.finishTable(l.next, "")
+}

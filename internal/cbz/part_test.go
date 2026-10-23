@@ -40,11 +40,11 @@ func images(n int) memSource {
 
 func build(t *testing.T, src memSource, pages []int, info *cbz.Info) *cbz.Part {
 	t.Helper()
-	var sizes []int64
+	var imgs []cbz.Img
 	for _, p := range pages {
-		sizes = append(sizes, int64(len(src.imgs[p])))
+		imgs = append(imgs, cbz.Img{Page: p, Size: int64(len(src.imgs[p]))})
 	}
-	p, err := cbz.NewPart(src, pages, sizes, info, time.Date(2024, 3, 4, 5, 6, 8, 0, time.UTC))
+	p, err := cbz.NewPart(src, imgs, info, time.Date(2024, 3, 4, 5, 6, 8, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +169,24 @@ func TestZipReaderOverReaderAt(t *testing.T) {
 }
 
 func TestTooBig(t *testing.T) {
-	_, err := cbz.NewPart(memSource{}, []int{0}, []int64{1 << 33}, nil, time.Now())
+	_, err := cbz.NewPart(memSource{}, []cbz.Img{{Page: 0, Size: 1 << 33}}, nil, time.Now())
 	if !errors.Is(err, cbz.ErrTooBig) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestExtensions(t *testing.T) {
+	src := images(2)
+	p, err := cbz.NewPart(src, []cbz.Img{
+		{Page: 0, Size: int64(len(src.imgs[0])), Ext: "png"},
+		{Page: 1, Size: int64(len(src.imgs[1])), Ext: "jpg"},
+	}, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := full(t, p)
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil || zr.File[0].Name != "0001.png" || zr.File[1].Name != "0002.jpg" {
+		t.Fatalf("err=%v names=%v", err, zr.File)
 	}
 }
