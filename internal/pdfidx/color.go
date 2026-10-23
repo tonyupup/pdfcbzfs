@@ -5,10 +5,14 @@ import "fmt"
 // pngSpecFor maps a Flate image dictionary onto a PNG, or explains why not.
 // Supported: DeviceGray/RGB (also Cal*, ICCBased with N=1 or 3) at 1/2/4/8
 // bits (RGB: 8), and Indexed over gray/RGB. Anything else (CMYK, Lab,
-// Separation, 16-bit, alpha) is reported as unsupported.
-func (d *doc) pngSpecFor(id dict, num, gen int, parms dict) (*pngSpec, error) {
+// Separation, 16-bit, alpha) is reported as unsupported. An /ImageMask is
+// treated as black ink on a white page.
+func (d *doc) pngSpecFor(id dict, num, gen int, parms dict, mask, invert bool) (*pngSpec, error) {
 	w, h := intOf(id, "Width", 0), intOf(id, "Height", 0)
 	bpc := intOf(id, "BitsPerComponent", 0)
+	if mask {
+		bpc = 1 // an image mask is always 1 bit; the key is optional
+	}
 	if w <= 0 || h <= 0 || w*h > 1<<28 {
 		return nil, fmt.Errorf("bad image size %dx%d", w, h)
 	}
@@ -17,7 +21,13 @@ func (d *doc) pngSpecFor(id dict, num, gen int, parms dict) (*pngSpec, error) {
 	default:
 		return nil, fmt.Errorf("%d bits per component", bpc)
 	}
-	s := &pngSpec{w: int(w), h: int(h), bpc: int(bpc), parms: parms}
+	s := &pngSpec{w: int(w), h: int(h), bpc: int(bpc), parms: parms, invert: invert}
+	if mask {
+		// Sample 0 paints (black, the usual fill) and 1 leaves the page
+		// white, which is exactly 1-bit DeviceGray.
+		s.ctype, s.colors = 0, 1
+		return s, nil
+	}
 	ct, comps, base, err := d.colorSpace(id["ColorSpace"], 0)
 	if err != nil {
 		return nil, err

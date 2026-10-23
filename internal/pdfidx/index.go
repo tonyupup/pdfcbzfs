@@ -196,13 +196,29 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 	if len(names) != 1 {
 		return zero, unsupported("image filters %v", names)
 	}
-	if _, ok := id["Decode"]; ok {
-		return zero, unsupported("image has /Decode")
-	}
-	for _, k := range []string{"SMask", "Mask", "ImageMask"} {
-		if v, ok := id[k]; ok && v != false {
-			return zero, unsupported("image has /%s", k)
+	mask := id["ImageMask"] == true
+	invert := false
+	if dec, ok := id["Decode"]; ok {
+		a, _ := dec.(array)
+		if !mask || len(a) != 2 {
+			return zero, unsupported("image has /Decode")
 		}
+		switch {
+		case numIs(a[0], 0) && numIs(a[1], 1):
+		case numIs(a[0], 1) && numIs(a[1], 0):
+			invert = true
+		default:
+			return zero, unsupported("image has /Decode")
+		}
+	}
+	if !mask {
+		for _, k := range []string{"SMask", "Mask"} {
+			if v, ok := id[k]; ok && v != false {
+				return zero, unsupported("image has /%s", k)
+			}
+		}
+	} else if _, ok := id["SMask"]; ok {
+		return zero, unsupported("image mask has /SMask")
 	}
 	l, err := w.d.streamLength(id)
 	if err != nil {
@@ -225,11 +241,14 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 		}
 		return Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"}, nil
 	case "FlateDecode", "Fl":
-		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0])
+		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0], mask, invert)
 		if err != nil {
 			return zero, unsupported("%v", err)
 		}
 		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
+	}
+	if mask {
+		return zero, unsupported("image mask with filter %s", names[0])
 	}
 	return zero, unsupported("image filter %s", names[0])
 }
@@ -341,4 +360,15 @@ func (c *imgCache) put(page int, b []byte) {
 		delete(c.items, it.page)
 		c.used -= len(it.b)
 	}
+}
+
+// numIs reports whether a parsed PDF number equals want (ints or reals).
+func numIs(v any, want int64) bool {
+	switch n := v.(type) {
+	case int64:
+		return n == want
+	case float64:
+		return n == float64(want)
+	}
+	return false
 }

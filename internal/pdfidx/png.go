@@ -16,6 +16,7 @@ type pngSpec struct {
 	ctype     byte // PNG colour type: 0 gray, 2 RGB, 3 indexed
 	palette   []byte
 	parms     dict // /DecodeParms (predictor), may be nil
+	invert    bool // flip every sample bit (ImageMask with /Decode [1 0])
 }
 
 func (s *pngSpec) rowBytes() int { return (s.w*s.colors*s.bpc + 7) / 8 }
@@ -110,6 +111,11 @@ func (s *pngSpec) decodeRaw(stream []byte) ([]byte, error) {
 		raw, err = applyPredictor(s.parms, raw)
 		if err != nil {
 			return nil, err
+		}
+	}
+	if s.invert {
+		for i := range raw {
+			raw[i] = ^raw[i]
 		}
 	}
 	return raw, nil

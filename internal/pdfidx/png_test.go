@@ -156,3 +156,52 @@ func TestUnsupportedFlateImages(t *testing.T) {
 		}
 	}
 }
+
+func TestImageMaskBecomesGrayPNG(t *testing.T) {
+	for _, c := range []struct {
+		name, decode string
+		invert       bool
+	}{
+		{"default", "", false},
+		{"decode01", "[0 1]", false},
+		{"decode10", "[1.0 0]", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			im := testpdf.RawImage(3, 45, 7, 1, "/DeviceGray", 1)
+			im.Mask, im.Decode = true, c.decode
+			pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+			x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if x.Pages[0].Ext != "png" {
+				t.Fatalf("ext %q", x.Pages[0].Ext)
+			}
+			g, ok := readPNG(t, pdf, x, 0).(*image.Gray)
+			if !ok {
+				t.Fatal("not a gray image")
+			}
+			rb := (45 + 7) / 8
+			for y := 0; y < 7; y++ {
+				for x, v := range unpack(im.Rows, rb, y, 45, 1) {
+					if c.invert {
+						v ^= 1
+					}
+					// 1-bit gray: sample 0 is black, 1 is white
+					if want := byte(v * 255); g.GrayAt(x, y).Y != want {
+						t.Fatalf("(%d,%d) = %d, want %d", x, y, g.GrayAt(x, y).Y, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestImageMaskOddDecodeUnsupported(t *testing.T) {
+	im := testpdf.RawImage(3, 8, 8, 1, "/DeviceGray", 1)
+	im.Mask, im.Decode = true, "[0 0.5]"
+	pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+	if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); !errors.Is(err, pdfidx.ErrUnsupported) {
+		t.Fatalf("err = %v", err)
+	}
+}

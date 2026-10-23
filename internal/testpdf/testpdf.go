@@ -292,6 +292,8 @@ type Raw struct {
 	W, H, Bpc  int
 	ColorSpace string // PDF colour space, e.g. "/DeviceGray" or "[/Indexed /DeviceRGB 15 <...>]"
 	Rows       []byte // H * rowBytes
+	Mask       bool   // /ImageMask true (1-bit stencil; ColorSpace is ignored)
+	Decode     string // optional /Decode array, e.g. "[1 0]"
 }
 
 // RawImage makes a deterministic image of the given shape.
@@ -312,8 +314,15 @@ func ClassicRaw(imgs []Raw) []byte {
 	b.writeTree(l, Opts{}, n)
 	for i, im := range imgs {
 		b.obj(l.pageObj[i], pageBody(2, l.imgObj[i], false))
-		b.stream(l.imgObj[i], fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s /BitsPerComponent %d /Filter /FlateDecode",
-			im.W, im.H, im.ColorSpace, im.Bpc), deflate(im.Rows), 0)
+		d := fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s /BitsPerComponent %d /Filter /FlateDecode",
+			im.W, im.H, im.ColorSpace, im.Bpc)
+		if im.Mask {
+			d = fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /ImageMask true /BitsPerComponent 1 /Filter /FlateDecode", im.W, im.H)
+		}
+		if im.Decode != "" {
+			d += " /Decode " + im.Decode
+		}
+		b.stream(l.imgObj[i], d, deflate(im.Rows), 0)
 	}
 	return b.finishTable(l.next, "")
 }

@@ -11,7 +11,8 @@ usual shape of scanned books and comics:
 * **JPEG** (`DCTDecode`) pages are copied out byte for byte (`0001.jpg`, ...):
   no re-encoding and almost no CPU use.
 * **Flate raw-sample** pages (1/2/4/8-bit gray, 8-bit RGB, or Indexed palettes
-  over those; ICCBased with N=1/3) are wrapped losslessly into a PNG
+  over those; ICCBased with N=1/3; also 1-bit `/ImageMask` stencils with
+  `/Decode [0 1]` or `[1 0]`, drawn as black ink on a white page) are wrapped losslessly into a PNG
   (`0001.png`, ...) with the original bit depth and palette. The PNG uses
   stored (uncompressed) deflate blocks, so its size is known exactly from the
   image geometry without decoding anything, and pages are only decoded when
@@ -22,7 +23,8 @@ work at any offset, and CRC32s are computed lazily the first time an archive's
 headers are needed.
 
 Anything else (text/layered PDFs, pages with several images, CMYK or `/Decode`
-images, alpha/`/SMask`, JPEG 2000, 16-bit, other filters, damaged files, wrong
+images, alpha/`/SMask`, JPEG 2000, 16-bit, other filters such as CCITT or JBIG2
+(common for 1-bit scans), damaged files, wrong
 or missing password) is **passed through untouched** as a normal `.pdf`. Run
 with `-v` to see why a given PDF was passed through.
 
