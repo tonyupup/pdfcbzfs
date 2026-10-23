@@ -52,3 +52,28 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/pdfcbzfs-linux-${{ matrix.goarch }}
+
+  # Rolling pre-release: every push to master replaces the "latest" assets.
+  latest:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    concurrency: rolling-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pdfcbzfs-linux-*
+          merge-multiple: true
+      - name: Move the latest tag to this commit
+        run: |
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest (master ${{ github.sha }})
+          prerelease: true
+          body: Automatic build of master at ${{ github.sha }}. Use a v* release for a stable version.
+          files: dist/pdfcbzfs-linux-*
