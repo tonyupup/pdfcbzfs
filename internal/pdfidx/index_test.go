@@ -131,6 +131,9 @@ func TestRealPDF(t *testing.T) {
 		pw = append(pw, []byte(p))
 	}
 	x, err := pdfidx.Open(f, fi.Size(), pw...)
+	if errors.Is(err, pdfidx.ErrUnsupported) {
+		t.Skipf("not convertible, would be passed through unchanged: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

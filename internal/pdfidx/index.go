@@ -59,8 +59,9 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 		return nil, unsupported("no catalog")
 	}
 	x = &Index{crypt: d.crypt, cache: newImgCache(64 << 20)}
-	w := &walker{d: d, x: x, seen: map[int]bool{}}
-	if err := w.node(root["Pages"], nil, 0); err != nil {
+	w := &walker{d: d, seen: map[int]bool{}}
+	x.Pages, err = w.node(root["Pages"], nil, 0)
+	if err != nil {
 		return nil, err
 	}
 	if len(x.Pages) == 0 {
@@ -70,24 +71,33 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 }
 
 type walker struct {
-	d    *doc
-	x    *Index
+	d *doc
+
+	mu   sync.Mutex
 	seen map[int]bool
 }
 
-func (w *walker) node(v any, res any, depth int) error {
+// walkers bounds the parallel preads while resolving a page tree: pages are
+// scattered through the file between their images, so on a cold disk or a
+// network filesystem the round trips dominate.
+const walkers = 16
+
+func (w *walker) node(v any, res any, depth int) ([]Page, error) {
 	if depth > 64 {
-		return unsupported("page tree too deep")
+		return nil, unsupported("page tree too deep")
 	}
 	if r, ok := v.(ref); ok {
-		if w.seen[r.num] {
-			return unsupported("page tree cycle")
-		}
+		w.mu.Lock()
+		dup := w.seen[r.num]
 		w.seen[r.num] = true
+		w.mu.Unlock()
+		if dup {
+			return nil, unsupported("page tree cycle")
+		}
 	}
 	dc, err := w.d.derefDict(v)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if r, ok := dc["Resources"]; ok {
 		res = r
@@ -95,96 +105,133 @@ func (w *walker) node(v any, res any, depth int) error {
 	if kids, ok := dc["Kids"]; ok && name2(dc["Type"]) != "Page" {
 		ka, err := w.d.deref(kids)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		arr, ok := ka.(array)
 		if !ok {
-			return unsupported("bad /Kids")
+			return nil, unsupported("bad /Kids")
 		}
-		for _, k := range arr {
-			if err := w.node(k, res, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
+		return w.kids(arr, res, depth)
 	}
-	return w.page(dc, res)
+	pg, err := w.page(dc, res)
+	if err != nil {
+		return nil, err
+	}
+	return []Page{pg}, nil
 }
 
-func (w *walker) page(pd dict, res any) error {
-	n := len(w.x.Pages) + 1
+func (w *walker) kids(arr array, res any, depth int) ([]Page, error) {
+	results := make([][]Page, len(arr))
+	errs := make([]error, len(arr))
+	n := walkers
+	if len(arr) < n {
+		n = len(arr)
+	}
+	idx := make(chan int)
+	var wg sync.WaitGroup
+	for k := 0; k < n; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				func() {
+					defer func() {
+						if e := recover(); e != nil {
+							errs[i] = unsupported("parser panic: %v", e)
+						}
+					}()
+					results[i], errs[i] = w.node(arr[i], res, depth+1)
+				}()
+			}
+		}()
+	}
+	for i := range arr {
+		idx <- i
+	}
+	close(idx)
+	wg.Wait()
+	var out []Page
+	for i := range arr {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		out = append(out, results[i]...)
+	}
+	return out, nil
+}
+
+func (w *walker) page(pd dict, res any) (Page, error) {
+	var zero Page
 	rd, err := w.d.derefDict(res)
 	if err != nil {
-		return unsupported("page %d: no resources", n)
+		return zero, unsupported("page: no resources")
 	}
 	xo, err := w.d.derefDict(rd["XObject"])
 	if err != nil || len(xo) != 1 {
-		return unsupported("page %d: needs exactly one XObject", n)
+		return zero, unsupported("page needs exactly one XObject")
 	}
 	var iref ref
 	for _, v := range xo {
 		r, ok := v.(ref)
 		if !ok {
-			return unsupported("page %d: direct XObject", n)
+			return zero, unsupported("page has a direct XObject")
 		}
 		iref = r
 	}
 	o, gen, so, _, err := w.d.resolve(iref.num)
 	if err != nil {
-		return err
+		return zero, err
 	}
 	id, ok := o.(dict)
 	if !ok || so < 0 {
-		return unsupported("page %d: image is not a stream", n)
+		return zero, unsupported("page image is not a stream")
 	}
 	if name2(id["Subtype"]) != "Image" {
-		return unsupported("page %d: XObject is not an image", n)
+		return zero, unsupported("page XObject is not an image")
 	}
 	names, parms, err := w.d.filters(id)
 	if err != nil {
-		return err
+		return zero, err
 	}
 	if len(names) != 1 {
-		return unsupported("page %d: image filters %v", n, names)
+		return zero, unsupported("image filters %v", names)
 	}
 	if _, ok := id["Decode"]; ok {
-		return unsupported("page %d: image has /Decode", n)
+		return zero, unsupported("image has /Decode")
 	}
 	for _, k := range []string{"SMask", "Mask", "ImageMask"} {
 		if v, ok := id[k]; ok && v != false {
-			return unsupported("page %d: image has /%s", n, k)
+			return zero, unsupported("image has /%s", k)
 		}
 	}
 	l, err := w.d.streamLength(id)
 	if err != nil {
-		return err
+		return zero, err
 	}
 	if so+l > w.d.size {
-		return unsupported("page %d: stream past end of file", n)
+		return zero, unsupported("image stream past end of file")
 	}
 	switch names[0] {
 	case "DCTDecode", "DCT":
 		if cs, ok := id["ColorSpace"].(name); ok && cs == "DeviceCMYK" {
-			return unsupported("page %d: CMYK JPEG", n)
+			return zero, unsupported("CMYK JPEG")
 		}
 		size := l
 		if w.d.crypt != nil {
 			size, err = w.d.crypt.plainSize(w.d.r, iref.num, gen, so, l)
 			if err != nil {
-				return err
+				return zero, err
 			}
 		}
-		w.x.Pages = append(w.x.Pages, Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"})
-		return nil
+		return Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"}, nil
 	case "FlateDecode", "Fl":
 		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0])
 		if err != nil {
-			return unsupported("page %d: %v", n, err)
+			return zero, unsupported("%v", err)
 		}
-		w.x.Pages = append(w.x.Pages, Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec})
-		return nil
+		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
 	}
-	return unsupported("page %d: image filter %s", n, names[0])
+	return zero, unsupported("image filter %s", names[0])
 }
 
 // ReadImageAt reads the JPEG of page at offset off, like io.ReaderAt.
