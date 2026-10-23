@@ -22,6 +22,7 @@ type Mode string
 const (
 	Auto   Mode = "auto"   // <= PagesPerCBZ pages: a single .cbz in place; more: a directory of parts
 	Folder Mode = "folder" // always a directory of parts
+	Flat   Mode = "flat"   // <= PagesPerCBZ pages: a single .cbz; more: "Name vNN.cbz" parts next to where the PDF was
 )
 
 type Config struct {
@@ -42,7 +43,8 @@ type PDF struct {
 	Gid    uint32
 	Idx    *pdfidx.Index
 	Parts  []*cbz.Part
-	Folder bool
+	Folder bool // parts live in a directory named after the PDF
+	Flat   bool // several parts, placed directly in the PDF's directory
 }
 
 // IsPDFName reports whether name has a .pdf extension (any case) and returns
@@ -62,8 +64,28 @@ func IsCBZName(name string) (stem string, ok bool) {
 	return "", false
 }
 
+// Single reports whether the PDF is presented as exactly one Stem.cbz.
+func (p *PDF) Single() bool { return !p.Folder && !p.Flat }
+
 func (p *PDF) SingleName() string { return p.Stem + ".cbz" }
 func (p *PDF) DirName() string    { return p.Stem }
+
+// FlatName returns the file name of part i for a Flat PDF.
+func (p *PDF) FlatName(i int) string { return p.PartName(i) }
+
+// SplitPartName splits "Stem vNN" (the stem of a part's file name) into the
+// PDF stem and the 1-based part number.
+func SplitPartName(stem string) (base string, part int, ok bool) {
+	i := strings.LastIndex(stem, " v")
+	if i <= 0 || i+2 >= len(stem) {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(stem[i+2:])
+	if err != nil || n < 1 || stem[i+2] == '+' || stem[i+2] == '-' {
+		return "", 0, false
+	}
+	return stem[:i], n, true
+}
 
 func (p *PDF) PartName(i int) string {
 	w := len(strconv.Itoa(len(p.Parts)))
@@ -184,7 +206,9 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 	}
 	n := len(idx.Pages)
 	per := c.cfg.PagesPerCBZ
-	p.Folder = c.cfg.Mode == Folder || n > per
+	p.Folder = c.cfg.Mode == Folder || (c.cfg.Mode == Auto && n > per)
+	p.Flat = c.cfg.Mode == Flat && n > per
+	multi := p.Folder || p.Flat
 	for first, part := 0, 1; first < n; first, part = first+per, part+1 {
 		last := first + per
 		if last > n {
@@ -195,7 +219,7 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 			imgs = append(imgs, cbz.Img{Page: i, Size: idx.Pages[i].Size, Ext: idx.Pages[i].Ext})
 		}
 		var info *cbz.Info
-		if p.Folder {
+		if multi {
 			info = &cbz.Info{Series: stem, Number: part}
 		}
 		cp, err := cbz.NewPart(idx, imgs, info, p.Mod)
@@ -203,7 +227,7 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 			return nil, err
 		}
 		p.Parts = append(p.Parts, cp)
-		if !p.Folder {
+		if !multi {
 			break
 		}
 	}

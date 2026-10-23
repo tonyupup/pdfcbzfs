@@ -28,10 +28,16 @@ with `-v` to see why a given PDF was passed through.
 
 ## Presentation
 
-| PDF | `pdf_mode=auto` (default) | `pdf_mode=folder` |
-| --- | --- | --- |
-| `<= pages_per_cbz` pages | `Book.cbz` next to where `Book.pdf` was | `Book/Book v01.cbz` |
-| more pages | `Book/Book v01.cbz`, `v02.cbz`, ... | same |
+Chosen with `-o pdf_mode=...`:
+
+| PDF | `auto` (default) | `flat` | `folder` |
+| --- | --- | --- | --- |
+| `<= pages_per_cbz` pages | `Book.cbz` next to where `Book.pdf` was | `Book.cbz` | `Book/Book v01.cbz` |
+| more pages | `Book/Book v01.cbz`, `v02.cbz`, ... | `Book v01.cbz`, `Book v02.cbz`, ... in the same directory | `Book/Book v01.cbz`, `v02.cbz`, ... |
+
+`flat` never creates subdirectories: every CBZ sits directly beside the
+(hidden) PDF. `folder` always puts the parts in a subdirectory named after the
+PDF.
 
 The original `Book.pdf` is hidden. Multi-part archives carry a
 `ComicInfo.xml` with `<Series>` and `<Number>`. If a real file or directory
@@ -58,7 +64,7 @@ pdfcbzfs LOWER MOUNTPOINT [-o opt[,opt...]] [-f] [-d] [-v]
 | `-o ro` / `-o rw` | read-only / read-write (default rw) |
 | `-o allow_other` | let other users access the mount (needed for knfsd or a media server running as another user) |
 | `-o pages_per_cbz=N` | pages per generated CBZ (default 200) |
-| `-o pdf_mode=auto\|folder` | see Presentation (default `auto`) |
+| `-o pdf_mode=auto\|flat\|folder` | see Presentation (default `auto`) |
 | `-f` | stay in the foreground (default: daemonize once the mount succeeded; mount errors go to stderr and the exit status) |
 | `-d` | log FUSE requests (implies `-f`) |
 | `-v` | log why PDFs are passed through (use with `-f`) |

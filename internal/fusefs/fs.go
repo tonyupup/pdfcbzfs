@@ -108,8 +108,13 @@ func (n *pnode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*f
 		return n.LoopbackNode.Lookup(ctx, name, out)
 	}
 	if stem, ok := view.IsCBZName(name); ok {
-		if p := n.fsys.findPDF(dir, stem); p != nil && !p.Folder {
+		if p := n.fsys.findPDF(dir, stem); p != nil && p.Single() {
 			return n.newVFile(ctx, p, 0, out), 0
+		}
+		if base, num, ok := view.SplitPartName(stem); ok {
+			if p := n.fsys.findPDF(dir, base); p != nil && p.Flat && num <= len(p.Parts) && p.FlatName(num-1) == name {
+				return n.newVFile(ctx, p, num-1, out), 0
+			}
 		}
 	}
 	if p := n.fsys.findPDF(dir, name); p != nil && p.Folder {
@@ -165,6 +170,12 @@ func (f *FS) list(dir string) ([]visible, error) {
 				if p.Folder {
 					if !exist[p.DirName()] {
 						out = append(out, visible{p.DirName(), syscall.S_IFDIR, p.DirIno(), p})
+					}
+				} else if p.Flat {
+					for i := range p.Parts {
+						if name := p.FlatName(i); !exist[name] {
+							out = append(out, visible{name, syscall.S_IFREG, p.PartIno(i), nil})
+						}
 					}
 				} else if !exist[p.SingleName()] {
 					out = append(out, visible{p.SingleName(), syscall.S_IFREG, p.SingleIno(), nil})
@@ -324,7 +335,7 @@ func (n *pnode) newVFile(ctx context.Context, p *view.PDF, part int, out *fuse.E
 func newVFile(ctx context.Context, parent *fs.Inode, p *view.PDF, part int, out *fuse.EntryOut) *fs.Inode {
 	v := &vfile{pdf: p, part: part}
 	ino := p.PartIno(part)
-	if !p.Folder {
+	if p.Single() {
 		ino = p.SingleIno()
 	}
 	v.fill(&out.Attr, ino)
@@ -348,7 +359,7 @@ var _ = (fs.NodeGetattrer)((*vfile)(nil))
 
 func (v *vfile) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	ino := v.pdf.PartIno(v.part)
-	if !v.pdf.Folder {
+	if v.pdf.Single() {
 		ino = v.pdf.SingleIno()
 	}
 	v.fill(&out.Attr, ino)

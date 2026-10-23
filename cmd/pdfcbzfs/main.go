@@ -39,7 +39,10 @@ mount options:
                       (needed for knfsd and for media servers running as another user)
     pages_per_cbz=N   pages per generated CBZ (default 200)
     pdf_mode=MODE     auto (default): short PDFs become one .cbz in place,
-                      longer ones a directory of parts; folder: always a directory
+                      longer ones a directory of parts;
+                      flat: one .cbz, or "Name v01.cbz", "Name v02.cbz"... all
+                      directly in the PDF's directory (no subdirectory);
+                      folder: always a subdirectory "Name/Name v01.cbz"
     verbose, debug    same as -v / -d
     other standard mount options (nosuid, nodev, noatime, default_permissions,
     fsname=, subtype=, x-*, ...) are accepted and ignored
@@ -134,8 +137,8 @@ func (c *config) parseOpts(s string) error {
 			}
 			c.pages = n
 		case "pdf_mode":
-			if v != "auto" && v != "folder" {
-				return fmt.Errorf("pdf_mode must be auto or folder, got %q", v)
+			if v != "auto" && v != "folder" && v != "flat" {
+				return fmt.Errorf("pdf_mode must be auto, folder or flat, got %q", v)
 			}
 			c.mode = view.Mode(v)
 		case "debug":

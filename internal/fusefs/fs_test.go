@@ -193,3 +193,37 @@ func TestFlatePDFBecomesPNGPages(t *testing.T) {
 		rc.Close()
 	}
 }
+
+func TestFlatMode(t *testing.T) {
+	lower, mnt := mountTest(t, view.Config{PagesPerCBZ: 3, Mode: view.Flat})
+	j := jpegs(7)
+	os.Mkdir(filepath.Join(lower, "sub"), 0o755)
+	os.WriteFile(filepath.Join(lower, "sub", "short.pdf"), testpdf.Classic(j[:2], testpdf.Opts{}), 0o644)
+	os.WriteFile(filepath.Join(lower, "long.pdf"), testpdf.Classic(j, testpdf.Opts{}), 0o644)
+
+	want := []string{"long v01.cbz", "long v02.cbz", "long v03.cbz", "sub"}
+	if got := names(t, mnt); !equal(got, want) {
+		t.Fatalf("root = %v, want %v", got, want)
+	}
+	if got := names(t, filepath.Join(mnt, "sub")); !equal(got, []string{"short.cbz"}) {
+		t.Fatalf("sub = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "long")); !os.IsNotExist(err) {
+		t.Fatalf("flat mode must not create a directory, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "long v04.cbz")); !os.IsNotExist(err) {
+		t.Fatalf("part beyond the last must not exist, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "long.cbz")); !os.IsNotExist(err) {
+		t.Fatalf("multi-part PDF must not also appear as long.cbz, got %v", err)
+	}
+	z3 := readZip(t, filepath.Join(mnt, "long v03.cbz"))
+	if len(z3.File) != 2 || z3.File[0].Name != "ComicInfo.xml" {
+		t.Fatalf("part 3 entries: %d, first %q", len(z3.File), z3.File[0].Name)
+	}
+	z1 := readZip(t, filepath.Join(mnt, "long v01.cbz"))
+	rc, _ := z1.File[1].Open()
+	if b, _ := io.ReadAll(rc); !bytes.Equal(b, j[0]) {
+		t.Fatal("part 1 first page differs")
+	}
+}

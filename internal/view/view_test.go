@@ -102,3 +102,45 @@ func TestNames(t *testing.T) {
 		t.Fatal(s, ok)
 	}
 }
+
+func TestFlatMode(t *testing.T) {
+	dir := t.TempDir()
+	c := view.NewCache(view.Config{PagesPerCBZ: 5, Mode: view.Flat})
+
+	p, st := write(t, dir, "small.pdf", pdf(5))
+	v := c.Probe(p, st)
+	if v == nil || v.Folder || v.Flat || !v.Single() || len(v.Parts) != 1 {
+		t.Fatalf("5 pages with N=5 should be one cbz: %+v", v)
+	}
+
+	p, st = write(t, dir, "Big Book.pdf", pdf(12))
+	v = c.Probe(p, st)
+	if v == nil || v.Folder || !v.Flat || v.Single() || len(v.Parts) != 3 {
+		t.Fatalf("12 pages with N=5 should be 3 flat parts: %+v", v)
+	}
+	if v.FlatName(1) != "Big Book v02.cbz" {
+		t.Fatalf("name %q", v.FlatName(1))
+	}
+}
+
+func TestSplitPartName(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		base string
+		n    int
+		ok   bool
+	}{
+		{"Book v01", "Book", 1, true},
+		{"My v2 Book v12", "My v2 Book", 12, true},
+		{"Book", "", 0, false},
+		{"Book v", "", 0, false},
+		{"Book vx1", "", 0, false},
+		{"Book v+1", "", 0, false},
+		{" v01", "", 0, false},
+	} {
+		b, n, ok := view.SplitPartName(c.in)
+		if b != c.base || n != c.n || ok != c.ok {
+			t.Errorf("%q = %q,%d,%v want %q,%d,%v", c.in, b, n, ok, c.base, c.n, c.ok)
+		}
+	}
+}
