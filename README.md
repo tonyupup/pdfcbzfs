@@ -28,9 +28,9 @@ with `-v` to see why a given PDF was passed through.
 
 ## Presentation
 
-| PDF | `--pdf-mode auto` (default) | `--pdf-mode folder` |
+| PDF | `pdf_mode=auto` (default) | `pdf_mode=folder` |
 | --- | --- | --- |
-| `<= --pages-per-cbz` pages | `Book.cbz` next to where `Book.pdf` was | `Book/Book v01.cbz` |
+| `<= pages_per_cbz` pages | `Book.cbz` next to where `Book.pdf` was | `Book/Book v01.cbz` |
 | more pages | `Book/Book v01.cbz`, `v02.cbz`, ... | same |
 
 The original `Book.pdf` is hidden. Multi-part archives carry a
@@ -47,12 +47,36 @@ re-probes the PDF. The `.passwd` file stays visible in the mount.
 
 ## Usage
 
+Standard FUSE command line:
+
 ```
-pdfcbzfs --lower DIR [--pages-per-cbz 200] [--pdf-mode auto|folder] [--ro] [--allow-other=true] [-v] MOUNTPOINT
+pdfcbzfs LOWER MOUNTPOINT [-o opt[,opt...]] [-f] [-d] [-v]
 ```
+
+| Option | Meaning |
+| --- | --- |
+| `-o ro` / `-o rw` | read-only / read-write (default rw) |
+| `-o allow_other` | let other users access the mount (needed for knfsd or a media server running as another user) |
+| `-o pages_per_cbz=N` | pages per generated CBZ (default 200) |
+| `-o pdf_mode=auto\|folder` | see Presentation (default `auto`) |
+| `-f` | stay in the foreground (default: daemonize once the mount succeeded; mount errors go to stderr and the exit status) |
+| `-d` | log FUSE requests (implies `-f`) |
+| `-v` | log why PDFs are passed through (use with `-f`) |
+
+Usual mount(8) options (`nosuid`, `nodev`, `noatime`, `default_permissions`,
+`x-*`, ...) are accepted and ignored.
 
 It mounts with `mount(2)` directly (no `fusermount` needed) and must run as
 root for that; with a `fusermount` available it also works unprivileged.
+
+As a mount helper (needs `mount.fuse`/`mount.fuse3` from the fuse package, and
+`pdfcbzfs` in `PATH`):
+
+```sh
+mount -t fuse.pdfcbzfs -o ro,allow_other,pages_per_cbz=200 /srv/manga-real /srv/manga
+# /etc/fstab
+/srv/manga-real  /srv/manga  fuse.pdfcbzfs  ro,allow_other,pages_per_cbz=200,nofail  0 0
+```
 
 To replace a directory in place (the usual deployment), keep a second view of
 the real directory and mount over the original path:
@@ -60,7 +84,7 @@ the real directory and mount over the original path:
 ```sh
 mkdir -p /srv/manga-real
 mount --bind /srv/manga /srv/manga-real
-pdfcbzfs --lower /srv/manga-real /srv/manga &
+pdfcbzfs /srv/manga-real /srv/manga -o allow_other
 ```
 
 Unmounting (`umount /srv/manga`) brings the original directory back; nothing
@@ -88,9 +112,9 @@ lower inode for real files, a hash for virtual ones) and implements
   stream); that is the price of exact sizes without decoding.
 * ICC profiles are not carried into the PNG.
 * A part larger than 4 GiB or with more than 65535 images (ZIP64) is not
-  generated; use a smaller `--pages-per-cbz`.
+  generated; use a smaller `pages_per_cbz`.
 * Chapter boundaries are not recoverable from a PDF; parts are fixed-size
-  slices of `--pages-per-cbz` pages.
+  slices of `pages_per_cbz` pages.
 * Virtual files are read-only.
 
 ## Build
