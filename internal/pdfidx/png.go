@@ -7,6 +7,8 @@ import (
 	"hash/adler32"
 	"hash/crc32"
 	"io"
+
+	"golang.org/x/image/ccitt"
 )
 
 // pngSpec describes a Flate raw-sample image that is presented as a PNG.
@@ -17,6 +19,13 @@ type pngSpec struct {
 	palette   []byte
 	parms     dict // /DecodeParms (predictor), may be nil
 	invert    bool // flip every sample bit (ImageMask with /Decode [1 0])
+	ccitt     *ccittSpec
+}
+
+// ccittSpec is the CCITTFaxDecode setup of a 1-bit image (Group 4 only).
+type ccittSpec struct {
+	align    bool // /EncodedByteAlign
+	blackIs1 bool // /BlackIs1
 }
 
 func (s *pngSpec) rowBytes() int { return (s.w*s.colors*s.bpc + 7) / 8 }
@@ -98,6 +107,9 @@ func (s *pngSpec) buildPNG(raw []byte) ([]byte, error) {
 
 // decodeRaw inflates a Flate image stream and undoes its predictor.
 func (s *pngSpec) decodeRaw(stream []byte) ([]byte, error) {
+	if s.ccitt != nil {
+		return s.decodeCCITT(stream)
+	}
 	zr, err := zlib.NewReader(bytes.NewReader(stream))
 	if err != nil {
 		return nil, unsupported("flate: %v", err)
@@ -113,10 +125,35 @@ func (s *pngSpec) decodeRaw(stream []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	s.flip(raw)
+	return raw, nil
+}
+
+func (s *pngSpec) flip(raw []byte) {
 	if s.invert {
 		for i := range raw {
 			raw[i] = ^raw[i]
 		}
+	}
+}
+
+// decodeCCITT decodes a Group 4 stream into h rows of packed 1-bit samples
+// as the PDF defines them (BlackIs1 false: 0 is black). Rows missing from a
+// damaged stream are left white in the final PNG; a stream that yields no row
+// is an error.
+func (s *pngSpec) decodeCCITT(stream []byte) ([]byte, error) {
+	rb := s.rowBytes()
+	zr := ccitt.NewReader(bytes.NewReader(stream), ccitt.MSB, ccitt.Group4, s.w, s.h,
+		&ccitt.Options{Align: s.ccitt.align, Invert: s.ccitt.blackIs1})
+	raw := make([]byte, s.h*rb)
+	n, err := io.ReadFull(zr, raw)
+	if n < rb {
+		return nil, unsupported("ccitt: no rows decoded: %v", err)
+	}
+	good := n - n%rb
+	s.flip(raw[:good])
+	for i := good; i < len(raw); i++ {
+		raw[i] = 0xFF // white in 1-bit gray
 	}
 	return raw, nil
 }

@@ -246,6 +246,23 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 			return zero, unsupported("%v", err)
 		}
 		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
+	case "CCITTFaxDecode", "CCF":
+		cc, err := ccittOf(parms[0])
+		if err != nil {
+			return zero, err
+		}
+		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0], mask, invert)
+		if err != nil {
+			return zero, unsupported("%v", err)
+		}
+		if spec.bpc != 1 || spec.colors != 1 {
+			return zero, unsupported("CCITT image is not 1-bit")
+		}
+		if cols := intOf(parms[0], "Columns", 1728); cols != int64(spec.w) {
+			return zero, unsupported("CCITT /Columns %d != /Width %d", cols, spec.w)
+		}
+		spec.ccitt = cc
+		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
 	}
 	if mask {
 		return zero, unsupported("image mask with filter %s", names[0])
@@ -371,4 +388,17 @@ func numIs(v any, want int64) bool {
 		return n == float64(want)
 	}
 	return false
+}
+
+// ccittOf reads /DecodeParms of a CCITTFaxDecode image. Only Group 4 (K < 0)
+// is supported: Group 3 streams routinely lack the EOL codes the decoder needs.
+func ccittOf(parms dict) (*ccittSpec, error) {
+	k, _ := parms["K"].(int64)
+	if _, isReal := parms["K"].(float64); isReal || k >= 0 {
+		return nil, unsupported("CCITT Group 3 (K=%v)", parms["K"])
+	}
+	c := &ccittSpec{}
+	c.align, _ = parms["EncodedByteAlign"].(bool)
+	c.blackIs1, _ = parms["BlackIs1"].(bool)
+	return c, nil
 }

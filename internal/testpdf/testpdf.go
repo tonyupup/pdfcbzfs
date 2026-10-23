@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"strings"
 )
 
 // JPEG returns a small deterministic gradient JPEG; different seeds differ.
@@ -294,6 +295,9 @@ type Raw struct {
 	Rows       []byte // H * rowBytes
 	Mask       bool   // /ImageMask true (1-bit stencil; ColorSpace is ignored)
 	Decode     string // optional /Decode array, e.g. "[1 0]"
+	Filter     string // with Data: PDF filter name, e.g. "CCITTFaxDecode" (default FlateDecode)
+	Parms      string // with Data: /DecodeParms dictionary body
+	Data       []byte // pre-encoded stream data used instead of deflating Rows
 }
 
 // RawImage makes a deterministic image of the given shape.
@@ -319,10 +323,15 @@ func ClassicRaw(imgs []Raw) []byte {
 		if im.Mask {
 			d = fmt.Sprintf("/Type /XObject /Subtype /Image /Width %d /Height %d /ImageMask true /BitsPerComponent 1 /Filter /FlateDecode", im.W, im.H)
 		}
+		data := deflate(im.Rows)
+		if im.Data != nil {
+			data = im.Data
+			d = strings.Replace(d, "/Filter /FlateDecode", "/Filter /"+im.Filter+" /DecodeParms << "+im.Parms+" >>", 1)
+		}
 		if im.Decode != "" {
 			d += " /Decode " + im.Decode
 		}
-		b.stream(l.imgObj[i], d, deflate(im.Rows), 0)
+		b.stream(l.imgObj[i], d, data, 0)
 	}
 	return b.finishTable(l.next, "")
 }

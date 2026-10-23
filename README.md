@@ -12,7 +12,9 @@ usual shape of scanned books and comics:
   no re-encoding and almost no CPU use.
 * **Flate raw-sample** pages (1/2/4/8-bit gray, 8-bit RGB, or Indexed palettes
   over those; ICCBased with N=1/3; also 1-bit `/ImageMask` stencils with
-  `/Decode [0 1]` or `[1 0]`, drawn as black ink on a white page) are wrapped losslessly into a PNG
+  `/Decode [0 1]` or `[1 0]`, drawn as black ink on a white page; also
+  1-bit **CCITT Group 4** (`CCITTFaxDecode`, `K < 0`) scans, decoded on read)
+  are wrapped losslessly into a PNG
   (`0001.png`, ...) with the original bit depth and palette. The PNG uses
   stored (uncompressed) deflate blocks, so its size is known exactly from the
   image geometry without decoding anything, and pages are only decoded when
@@ -23,8 +25,8 @@ work at any offset, and CRC32s are computed lazily the first time an archive's
 headers are needed.
 
 Anything else (text/layered PDFs, pages with several images, CMYK or `/Decode`
-images, alpha/`/SMask`, JPEG 2000, 16-bit, other filters such as CCITT or JBIG2
-(common for 1-bit scans), damaged files, wrong
+images, alpha/`/SMask`, JPEG 2000, 16-bit, CCITT Group 3 (`K >= 0`), JBIG2 and
+other filters, damaged files, wrong
 or missing password) is **passed through untouched** as a normal `.pdf`. Run
 with `-v` to see why a given PDF was passed through.
 
@@ -118,6 +120,9 @@ lower inode for real files, a hash for virtual ones) and implements
 * Pages are not re-rendered: no text PDFs, no layered pages. PNG pages are not
   compressed (a 4-bit scan becomes roughly 2x the size of the PDF's Flate
   stream); that is the price of exact sizes without decoding.
+* CCITT G4 pages shrink extremely well in the PDF but the PNG is stored
+  uncompressed (a 300 dpi A4 page of ~30 KB becomes ~1 MB), so such CBZs are
+  much larger than the PDF.
 * ICC profiles are not carried into the PNG.
 * A part larger than 4 GiB or with more than 65535 images (ZIP64) is not
   generated; use a smaller `pages_per_cbz`.

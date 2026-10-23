@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
 	"testing"
 
 	"github.com/tonyupup/pdfcbzfs/internal/pdfidx"
@@ -203,5 +204,115 @@ func TestImageMaskOddDecodeUnsupported(t *testing.T) {
 	pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
 	if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); !errors.Is(err, pdfidx.ErrUnsupported) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+const ccW, ccH = 203, 97
+
+func ccittFixture(t *testing.T) (g4, raw []byte) {
+	t.Helper()
+	g4, err := os.ReadFile("testdata/ccitt-203x97.g4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile("testdata/ccitt-203x97.raw") // 1 = white, 0 = black
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g4, raw
+}
+
+func checkGray1(t *testing.T, img image.Image, raw []byte, flip bool) {
+	t.Helper()
+	g, ok := img.(*image.Gray)
+	if !ok {
+		t.Fatalf("not a gray image: %T", img)
+	}
+	rb := (ccW + 7) / 8
+	for y := 0; y < ccH; y++ {
+		for x, v := range unpack(raw, rb, y, ccW, 1) {
+			if flip {
+				v ^= 1
+			}
+			if want := byte(v * 255); g.GrayAt(x, y).Y != want {
+				t.Fatalf("(%d,%d) = %d, want %d", x, y, g.GrayAt(x, y).Y, want)
+			}
+		}
+	}
+}
+
+func TestCCITTG4(t *testing.T) {
+	g4, raw := ccittFixture(t)
+	for _, c := range []struct {
+		name         string
+		mask         bool
+		decode       string
+		parms        string
+		flip         bool // expected output differs from the decoded 1=white bitmap
+		wantGrayFlip bool
+	}{
+		{"gray", false, "", "/K -1 /Columns 203 /Rows 97", false, false},
+		{"mask", true, "", "/K -1 /Columns 203 /Rows 97", false, false},
+		{"mask-decode10", true, "[1 0]", "/K -1 /Columns 203 /Rows 97", true, true},
+		{"blackis1-mask-decode10", true, "[1 0]", "/K -1 /Columns 203 /Rows 97 /BlackIs1 true", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			im := testpdf.Raw{W: ccW, H: ccH, Bpc: 1, ColorSpace: "/DeviceGray", Mask: c.mask, Decode: c.decode,
+				Filter: "CCITTFaxDecode", Parms: c.parms, Data: g4}
+			pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+			x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkGray1(t, readPNG(t, pdf, x, 0), raw, c.wantGrayFlip)
+		})
+	}
+}
+
+func TestCCITTRealPDF(t *testing.T) { // written by ImageMagick, an independent encoder
+	pdf, err := os.ReadFile("testdata/ccitt-g4-gray.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, raw := ccittFixture(t)
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Pages) != 1 || x.Pages[0].Ext != "png" {
+		t.Fatalf("pages: %+v", x.Pages)
+	}
+	checkGray1(t, readPNG(t, pdf, x, 0), raw, false)
+}
+
+func TestCCITTUnsupportedVariants(t *testing.T) {
+	g4, _ := ccittFixture(t)
+	for name, parms := range map[string]string{
+		"group3":        "/K 0 /Columns 203",
+		"default-k":     "/Columns 203",
+		"columns-width": "/K -1 /Columns 100",
+	} {
+		im := testpdf.Raw{W: ccW, H: ccH, Bpc: 1, ColorSpace: "/DeviceGray", Filter: "CCITTFaxDecode", Parms: parms, Data: g4}
+		pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+		if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); !errors.Is(err, pdfidx.ErrUnsupported) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
+func TestCCITTTruncatedStreamPadsWhite(t *testing.T) {
+	g4, _ := ccittFixture(t)
+	im := testpdf.Raw{W: ccW, H: ccH, Bpc: 1, ColorSpace: "/DeviceGray", Mask: true, Filter: "CCITTFaxDecode",
+		Parms: "/K -1 /Columns 203 /Rows 97", Data: g4[:len(g4)/2]}
+	pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := readPNG(t, pdf, x, 0).(*image.Gray)
+	for xx := 0; xx < ccW; xx++ {
+		if g.GrayAt(xx, ccH-1).Y != 255 {
+			t.Fatalf("missing last row must be white, got %d at x=%d", g.GrayAt(xx, ccH-1).Y, xx)
+		}
 	}
 }

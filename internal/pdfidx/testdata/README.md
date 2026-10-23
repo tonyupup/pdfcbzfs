@@ -9,3 +9,9 @@ password `owner-pw`; the `*-emptyuser` variants have an empty user password.
 RGB, 1-bit gray); `encraw-*.pdf` are its pypdf-encrypted variants (user
 password `user-pw`), used to check PNG synthesis from encrypted streams and
 palette strings.
+
+`ccitt-g4-gray.pdf` was written by ImageMagick (`convert x.tif -compress
+Group4`): one 203x97 DeviceGray CCITT Group 4 page. `ccitt-203x97.g4` is that
+page's raw CCITT stream and `ccitt-203x97.raw` the expected bitmap (packed
+rows, 1 = white), both used by the CCITT tests to build variants (ImageMask,
+`/Decode`, `BlackIs1`, truncation).
