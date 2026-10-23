@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/tonyupup/pdfcbzfs/internal/cbz"
 	"github.com/tonyupup/pdfcbzfs/internal/pdfidx"
 )
@@ -172,10 +170,6 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 		return nil, err
 	}
 	defer f.Close()
-	// Indexing makes thousands of small reads scattered between the image
-	// streams. With readahead on, each one drags in ~128 KiB of image data,
-	// so indexing a big PDF would read most of the file.
-	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_RANDOM)
 	idx, err := pdfidx.Open(f, st.Size, readPasswords(path)...)
 	if err != nil {
 		return nil, err
