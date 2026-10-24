@@ -40,8 +40,9 @@ type objStm struct {
 }
 
 type doc struct {
-	r    io.ReaderAt
+	r    io.ReaderAt // positioned at "%PDF-": offsets in the file are relative to it
 	size int64
+	base int64 // bytes before "%PDF-" in the real file (Page offsets add it back)
 
 	xref    map[int]xentry
 	trailer dict

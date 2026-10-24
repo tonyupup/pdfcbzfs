@@ -12,15 +12,23 @@ type section struct {
 }
 
 func (d *doc) loadXref() error {
-	n := int64(2048)
-	if n > d.size {
-		n = d.size
+	// startxref is normally in the last bytes, but some producers pad the file
+	// with zeros or garbage after %%EOF: widen the window before giving up.
+	var tail []byte
+	i := -1
+	for _, n := range []int64{2048, 64 << 10, 1 << 20} {
+		if n > d.size {
+			n = d.size
+		}
+		var err error
+		tail, err = d.readAt(d.size-n, int(n))
+		if err != nil {
+			return err
+		}
+		if i = bytes.LastIndex(tail, []byte("startxref")); i >= 0 || n == d.size {
+			break
+		}
 	}
-	tail, err := d.readAt(d.size-n, int(n))
-	if err != nil {
-		return err
-	}
-	i := bytes.LastIndex(tail, []byte("startxref"))
 	if i < 0 {
 		return unsupported("no startxref")
 	}

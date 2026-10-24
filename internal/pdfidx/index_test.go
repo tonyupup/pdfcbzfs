@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/tonyupup/pdfcbzfs/internal/pdfidx"
@@ -147,5 +148,49 @@ func TestRealPDF(t *testing.T) {
 			t.Fatalf("page %d does not start with a JPEG SOI: % x", i, hdr)
 		}
 		t.Logf("page %d: %d bytes, JPEG ok", i, x.Pages[i].Size)
+	}
+}
+
+func TestJunkAroundThePDF(t *testing.T) {
+	var j [][]byte
+	for i := 0; i < 3; i++ {
+		j = append(j, testpdf.JPEG(i, 16+i, 16))
+	}
+	cases := map[string][]byte{
+		"classic":     testpdf.Classic(j, testpdf.Opts{}),
+		"xref-stream": testpdf.XrefStream(j),
+		"nested-tree": testpdf.Classic(j, testpdf.Opts{NestedTree: true}),
+		"incremental": testpdf.WithUpdate(testpdf.Classic(j, testpdf.Opts{}), j, 2),
+	}
+	for name, base := range cases {
+		for variant, pdf := range map[string][]byte{
+			"prefix":  append([]byte("JUNK\n\x00\x01 before the header\n"), base...),
+			"padding": append(append([]byte{}, base...), make([]byte, 100<<10)...),
+			"both":    append(append([]byte("\xef\xbb\xbfjunk"), base...), make([]byte, 5000)...),
+		} {
+			x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+			if err != nil {
+				t.Fatalf("%s/%s: %v", name, variant, err)
+			}
+			r := bytes.NewReader(pdf)
+			for i, pg := range x.Pages {
+				buf := make([]byte, pg.Size)
+				if n, _ := x.ReadImageAt(r, i, buf, 0); int64(n) != pg.Size || !bytes.Equal(buf, j[i]) {
+					t.Fatalf("%s/%s page %d: image bytes differ", name, variant, i)
+				}
+			}
+		}
+	}
+}
+
+func TestUnsupportedLogSaysWhatThePageHolds(t *testing.T) {
+	var j [][]byte
+	for i := 0; i < 3; i++ {
+		j = append(j, testpdf.JPEG(i, 16, 16))
+	}
+	pdf := testpdf.Classic(j, testpdf.Opts{ExtraImage: 2})
+	_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err == nil || !strings.Contains(err.Error(), "found 2: Image=2") {
+		t.Fatalf("err = %v", err)
 	}
 }

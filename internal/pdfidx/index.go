@@ -1,6 +1,7 @@
 package pdfidx
 
 import (
+	"bytes"
 	"container/list"
 	"errors"
 	"fmt"
@@ -39,10 +40,15 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 			x, err = nil, unsupported("parser panic: %v", e)
 		}
 	}()
-	d := &doc{r: r, size: size, objstm: map[int]*objStm{}}
 	if size < 32 {
 		return nil, unsupported("file too small")
 	}
+	// PDF offsets count from the "%PDF-" header, which may follow junk bytes.
+	base := headerOffset(r, size)
+	if base > 0 {
+		r, size = io.NewSectionReader(r, base, size-base), size-base
+	}
+	d := &doc{r: r, size: size, base: base, objstm: map[int]*objStm{}}
 	if err := d.loadXref(); err != nil {
 		return nil, err
 	}
@@ -167,7 +173,7 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 	}
 	xo, err := w.d.derefDict(rd["XObject"])
 	if err != nil || len(xo) != 1 {
-		return zero, unsupported("page needs exactly one XObject")
+		return zero, unsupported("page needs exactly one XObject (%s)", w.describeXObjects(xo))
 	}
 	var iref ref
 	for _, v := range xo {
@@ -238,13 +244,13 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 				return zero, err
 			}
 		}
-		return Page{Off: so, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"}, nil
+		return Page{Off: so + w.d.base, Len: l, Size: size, Num: iref.num, Gen: gen, Ext: "jpg"}, nil
 	case "FlateDecode", "Fl":
 		spec, err := w.d.pngSpecFor(id, iref.num, gen, parms[0], mask, invert)
 		if err != nil {
 			return zero, unsupported("%v", err)
 		}
-		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
+		return Page{Off: so + w.d.base, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
 	case "CCITTFaxDecode", "CCF":
 		cc, err := ccittOf(parms[0])
 		if err != nil {
@@ -261,7 +267,7 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 			return zero, unsupported("CCITT /Columns %d != /Width %d", cols, spec.w)
 		}
 		spec.ccitt = cc
-		return Page{Off: so, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
+		return Page{Off: so + w.d.base, Len: l, Size: spec.pngSize(), Num: iref.num, Gen: gen, Ext: "png", png: spec}, nil
 	}
 	if mask {
 		return zero, unsupported("image mask with filter %s", names[0])
@@ -410,4 +416,45 @@ func ccittOf(parms dict) (*ccittSpec, error) {
 	c.align, _ = parms["EncodedByteAlign"].(bool)
 	c.blackIs1, _ = parms["BlackIs1"].(bool)
 	return c, nil
+}
+
+// headerOffset returns the position of "%PDF-" within the first KiB (the
+// range readers accept), or 0 when there is none.
+func headerOffset(r io.ReaderAt, size int64) int64 {
+	n := int64(1024)
+	if n > size {
+		n = size
+	}
+	b := make([]byte, n)
+	m, _ := r.ReadAt(b, 0)
+	if i := bytes.Index(b[:m], []byte("%PDF-")); i > 0 {
+		return int64(i)
+	}
+	return 0
+}
+
+// describeXObjects summarises a page's XObjects for the "unsupported" log.
+func (w *walker) describeXObjects(xo dict) string {
+	if len(xo) == 0 {
+		return "none: text or vector page, nothing to extract"
+	}
+	kinds := map[string]int{}
+	for _, v := range xo {
+		kind := "?"
+		if r, ok := v.(ref); ok {
+			if o, _, _, _, err := w.d.resolve(r.num); err == nil {
+				if dd, ok := o.(dict); ok {
+					kind = string(name2(dd["Subtype"]))
+				}
+			}
+		}
+		kinds[kind]++
+	}
+	out := fmt.Sprintf("found %d:", len(xo))
+	for _, k := range []string{"Image", "Form", "?"} {
+		if kinds[k] > 0 {
+			out += fmt.Sprintf(" %s=%d", k, kinds[k])
+		}
+	}
+	return out
 }
