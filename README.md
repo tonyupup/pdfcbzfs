@@ -91,6 +91,11 @@ Usual mount(8) options (`nosuid`, `nodev`, `noatime`, `default_permissions`,
 It mounts with `mount(2)` directly (no `fusermount` needed) and must run as
 root for that; with a `fusermount` available it also works unprivileged.
 
+If a previous instance was killed without unmounting (OOM, `kill -9`, crash),
+the dead FUSE mount it left at MOUNTPOINT (`Transport endpoint is not
+connected`) is detached automatically on the next start, so a restarted
+sidecar recovers by itself.
+
 As a mount helper (needs `mount.fuse`/`mount.fuse3` from the fuse package, and
 `pdfcbzfs` in `PATH`):
 

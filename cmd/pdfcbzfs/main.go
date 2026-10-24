@@ -8,6 +8,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -188,6 +189,7 @@ func run(c *config) {
 	if err != nil {
 		fail("lower: %v", err)
 	}
+	healStaleMount(c.mountpoint)
 	srv, err := f.Mount(c.mountpoint, fusefs.MountOptions{AllowOther: c.allowOther, ReadOnly: c.readOnly, Debug: c.debug})
 	if err != nil {
 		fail("mount: %v", err)
@@ -211,6 +213,23 @@ func run(c *config) {
 	}()
 	log.Printf("pdfcbzfs: %s -> %s (pages_per_cbz=%d, pdf_mode=%s)", c.lower, c.mountpoint, c.pages, c.mode)
 	srv.Wait()
+}
+
+// healStaleMount detaches the dead FUSE mount that a killed predecessor (OOM,
+// SIGKILL, crash) leaves behind: stat then fails with ENOTCONN and mounting on
+// top would fail too. Sidecars hit this on every restart. Mounts may have been
+// stacked by earlier restarts, so repeat until the path answers again.
+func healStaleMount(mp string) {
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(mp); !errors.Is(err, syscall.ENOTCONN) {
+			return
+		}
+		if err := syscall.Unmount(mp, syscall.MNT_DETACH); err != nil {
+			log.Printf("pdfcbzfs: stale mount at %s, cannot detach: %v", mp, err)
+			return
+		}
+		log.Printf("pdfcbzfs: detached stale mount at %s", mp)
+	}
 }
 
 // daemonize re-executes the program in the background with -f, waits until it
