@@ -139,6 +139,9 @@ func (w *walker) node(v any, res any, depth int) ([]Page, error) {
 	}
 	pg, err := w.page(dc, res)
 	if err != nil {
+		if r, ok := v.(ref); ok {
+			err = fmt.Errorf("page object %d: %w", r.num, err)
+		}
 		return nil, err
 	}
 	return []Page{pg}, nil
@@ -198,7 +201,13 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 	}
 	xo, err := w.d.derefDict(rd["XObject"])
 	if err != nil || len(xo) != 1 {
-		return zero, unsupported("page needs exactly one XObject (%s)", w.describeXObjects(xo))
+		// Several XObjects are fine when one is the page image and the
+		// content stream draws nothing else (the rest is never shown).
+		only, ok := w.soleDrawnImage(pd, xo)
+		if !ok {
+			return zero, unsupported("page needs exactly one XObject (%s)", w.describeXObjects(xo))
+		}
+		xo = only
 	}
 	var iref ref
 	for _, v := range xo {
@@ -482,4 +491,136 @@ func (w *walker) describeXObjects(xo dict) string {
 		}
 	}
 	return out
+}
+
+// soleDrawnImage returns the page's single image XObject when xo holds more
+// than one entry but the page content only places that image: no text, paths,
+// shadings, inline images, or any other XObject. Anything else (a visible
+// watermark form, a text layer) must keep the page unconvertible, since the
+// extracted image would not be the page.
+func (w *walker) soleDrawnImage(pd dict, xo dict) (dict, bool) {
+	if len(xo) < 2 {
+		return nil, false
+	}
+	var imgName name
+	var imgVal any
+	for k, v := range xo {
+		r, ok := v.(ref)
+		if !ok {
+			return nil, false
+		}
+		o, _, _, _, err := w.d.resolve(r.num)
+		if err != nil {
+			return nil, false
+		}
+		if dd, ok := o.(dict); ok && name2(dd["Subtype"]) == "Image" {
+			if imgVal != nil {
+				return nil, false
+			}
+			imgName, imgVal = name(k), v
+		}
+	}
+	if imgVal == nil {
+		return nil, false
+	}
+	content, err := w.pageContent(pd)
+	if err != nil || len(content) == 0 {
+		return nil, false
+	}
+	do, ok := plainDraw(content)
+	if !ok || len(do) != 1 || do[0] != string(imgName) {
+		return nil, false
+	}
+	return dict{string(imgName): imgVal}, true
+}
+
+// pageContent returns the decoded, concatenated page content streams.
+func (w *walker) pageContent(pd dict) ([]byte, error) {
+	v := pd["Contents"]
+	if r, ok := v.(ref); ok {
+		o, _, _, _, err := w.d.resolve(r.num)
+		if err != nil {
+			return nil, err
+		}
+		if a, ok := o.(array); ok { // /Contents may be an indirect array
+			v = a
+		}
+	}
+	var parts []any
+	if a, ok := v.(array); ok {
+		parts = a
+	} else {
+		parts = []any{v}
+	}
+	if len(parts) > 64 {
+		return nil, unsupported("too many content streams")
+	}
+	var out []byte
+	for _, p := range parts {
+		r, ok := p.(ref)
+		if !ok {
+			return nil, unsupported("direct content stream")
+		}
+		o, gen, so, _, err := w.d.resolve(r.num)
+		if err != nil {
+			return nil, err
+		}
+		dc, ok := o.(dict)
+		if !ok || so < 0 {
+			return nil, unsupported("content is not a stream")
+		}
+		b, err := w.d.streamData(r.num, gen, dc, so)
+		if err != nil {
+			return nil, err
+		}
+		out = append(append(out, b...), '\n')
+		if len(out) > maxStreamBytes {
+			return nil, unsupported("content stream too large")
+		}
+	}
+	return out, nil
+}
+
+// harmlessOps never put ink on the page: graphics state, colour selection,
+// marked content. Everything else (paths, text, shadings, inline images,
+// compatibility sections) makes plainDraw give up.
+var harmlessOps = map[string]bool{
+	"q": true, "Q": true, "cm": true, "gs": true, "w": true, "J": true, "j": true,
+	"M": true, "d": true, "ri": true, "i": true,
+	"g": true, "G": true, "rg": true, "RG": true, "k": true, "K": true,
+	"cs": true, "CS": true, "sc": true, "SC": true, "scn": true, "SCN": true,
+	"BMC": true, "BDC": true, "EMC": true, "MP": true, "DP": true,
+}
+
+// plainDraw lists the XObject names a content stream invokes with Do, and
+// reports false if it uses any operator outside harmlessOps (apart from Do).
+func plainDraw(b []byte) (do []string, ok bool) {
+	p := &parser{b: append(append([]byte{}, b...), ' ')}
+	var last any
+	for {
+		p.skipWS()
+		if p.pos >= len(p.b)-1 {
+			return do, true
+		}
+		o, err := p.parseObject()
+		if err != nil {
+			return nil, false
+		}
+		kw, isKw := o.(keyword)
+		if !isKw {
+			last = o
+			continue
+		}
+		switch {
+		case kw == "Do":
+			n, isName := last.(name)
+			if !isName {
+				return nil, false
+			}
+			do = append(do, string(n))
+		case !harmlessOps[string(kw)]:
+			return nil, false
+		}
+		last = nil
+	}
 }

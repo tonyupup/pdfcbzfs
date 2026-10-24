@@ -275,3 +275,55 @@ func TestUndefinedPageReferenceIsSkipped(t *testing.T) {
 		t.Fatalf("pages=%d skipped=%v want %d", len(x.Pages), x.Skipped, want)
 	}
 }
+
+func formPDF(t *testing.T, o testpdf.Opts) ([]byte, [][]byte) {
+	t.Helper()
+	var j [][]byte
+	for i := 0; i < 4; i++ {
+		j = append(j, testpdf.JPEG(i, 16, 16))
+	}
+	o.WithContents = true
+	return testpdf.Classic(j, o), j
+}
+
+func TestUnusedFormOnAPageIsIgnored(t *testing.T) {
+	for name, extra := range map[string]string{
+		"nothing": "",
+		"colour":  "0.5 g\n",
+		"marked":  "/Span <</MCID 0>> BDC\nEMC\n",
+	} {
+		pdf, j := formPDF(t, testpdf.Opts{FormPage: 2, PageExtra: extra})
+		x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(x.Pages) != len(j) {
+			t.Fatalf("%s: %d pages, want %d", name, len(x.Pages), len(j))
+		}
+		r := bytes.NewReader(pdf)
+		buf := make([]byte, x.Pages[1].Size)
+		if n, _ := x.ReadImageAt(r, 1, buf, 0); int64(n) != x.Pages[1].Size || !bytes.Equal(buf, j[1]) {
+			t.Fatalf("%s: page 2 is not the page-2 image", name)
+		}
+	}
+}
+
+func TestVisibleExtrasKeepThePageUnconvertible(t *testing.T) {
+	for name, o := range map[string]testpdf.Opts{
+		"drawn form": {FormPage: 2, FormDrawn: true},
+		"text":       {FormPage: 2, PageExtra: "BT /F1 12 Tf (hi) Tj ET\n"},
+		"path":       {FormPage: 2, PageExtra: "0 0 4 4 re f\n"},
+		"shading":    {FormPage: 2, PageExtra: "/Sh0 sh\n"},
+		"inline img": {FormPage: 2, PageExtra: "BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI\n"},
+	} {
+		pdf, _ := formPDF(t, o)
+		_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+		if !errors.Is(err, pdfidx.ErrUnsupported) {
+			t.Errorf("%s: err = %v", name, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "page object") || !strings.Contains(err.Error(), "found 2: Image=1 Form=1") {
+			t.Errorf("%s: log should name the page object and its XObjects: %v", name, err)
+		}
+	}
+}

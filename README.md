@@ -30,6 +30,11 @@ other filters, damaged files, wrong
 or missing password) is **passed through untouched** as a normal `.pdf`. Run
 with `-v` to see why a given PDF was passed through.
 
+A page may list extra XObjects (unused forms, stamps) as long as exactly one is
+an image and the page content only places that image (graphics state, colour
+and marked-content operators and one `Do`); a visible form, text, path or
+shading keeps the PDF unconverted. `-v` names the page object and what it holds.
+
 A few damaged pages are tolerated: if a page object is missing from the file
 or its xref entry points at the wrong place (for example an ad page cut out of
 the file), that page is left out of the CBZ and `-v` logs the object numbers.

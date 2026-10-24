@@ -33,6 +33,11 @@ type Opts struct {
 	IndirectLength bool // image /Length as an indirect reference
 	NestedTree     bool // page tree with intermediate /Pages nodes
 	ExtraImage     int  // 1-based page that gets a second image (unsupported)
+
+	WithContents bool   // every page gets a content stream that draws /Im0
+	FormPage     int    // 1-based page that also lists a Form XObject /Fm0
+	FormDrawn    bool   // ... and whose content stream invokes it
+	PageExtra    string // appended to the content stream of FormPage (or page 1)
 }
 
 type builder struct {
@@ -96,6 +101,19 @@ func pageBody(parent, img int, extra bool) string {
 	return fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 16 16] /Resources << /XObject << %s >> >> >>", parent, xo)
 }
 
+// pageBodyEx is pageBody plus an optional /Contents and /Fm0 form.
+func pageBodyEx(parent, img, contents, form int) string {
+	xo := fmt.Sprintf("/Im0 %d 0 R", img)
+	if form > 0 {
+		xo += fmt.Sprintf(" /Fm0 %d 0 R", form)
+	}
+	c := ""
+	if contents > 0 {
+		c = fmt.Sprintf(" /Contents %d 0 R", contents)
+	}
+	return fmt.Sprintf("<< /Type /Page /Parent %d 0 R /MediaBox [0 0 16 16]%s /Resources << /XObject << %s >> >> >>", parent, c, xo)
+}
+
 func (b *builder) writeTree(l layout, o Opts, n int) {
 	b.obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
 	if o.NestedTree {
@@ -125,6 +143,15 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 	b := newBuilder()
 	l := plan(n, o)
 	b.writeTree(l, o, n)
+	contentBase, formObj := 0, 0
+	if o.WithContents {
+		contentBase = l.next
+		l.next += n
+	}
+	if o.FormPage > 0 {
+		formObj = l.next
+		l.next++
+	}
 	lenObj := l.next
 	for i, j := range jpegs {
 		parent := 2
@@ -134,12 +161,34 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 				parent = l.tree[1]
 			}
 		}
-		b.obj(l.pageObj[i], pageBody(parent, l.imgObj[i], o.ExtraImage == i+1))
+		if o.WithContents || o.FormPage > 0 {
+			form, contents := 0, 0
+			if o.FormPage == i+1 {
+				form = formObj
+			}
+			if o.WithContents {
+				contents = contentBase + i
+				c := "q 16 0 0 16 0 0 cm /Im0 Do Q\n"
+				if form > 0 && o.FormDrawn {
+					c += "/Fm0 Do\n"
+				}
+				if o.FormPage == i+1 || (o.FormPage == 0 && i == 0) {
+					c += o.PageExtra
+				}
+				b.stream(contents, "", []byte(c), 0)
+			}
+			b.obj(l.pageObj[i], pageBodyEx(parent, l.imgObj[i], contents, form))
+		} else {
+			b.obj(l.pageObj[i], pageBody(parent, l.imgObj[i], o.ExtraImage == i+1))
+		}
 		ref := 0
 		if o.IndirectLength {
 			ref = lenObj + i
 		}
 		b.stream(l.imgObj[i], imageDict(j), j, ref)
+	}
+	if formObj > 0 {
+		b.stream(formObj, "/Type /XObject /Subtype /Form /BBox [0 0 16 16]", []byte("0 g 0 0 4 4 re f"), 0)
 	}
 	size := l.next
 	if o.IndirectLength {
