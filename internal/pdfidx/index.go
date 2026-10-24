@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 )
 
@@ -24,6 +25,9 @@ type Page struct {
 // Index is the result of scanning a PDF. It is safe for concurrent use.
 type Index struct {
 	Pages []Page
+	// Skipped lists the object numbers of page-tree entries that were left
+	// out because the object is missing or its xref entry is wrong.
+	Skipped []int
 
 	crypt *crypt
 }
@@ -72,14 +76,24 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 	if len(x.Pages) == 0 {
 		return nil, unsupported("no pages")
 	}
+	if n := len(w.skipped); n > 0 {
+		// A few dangling pages (an ad page cut out of the file, say) are
+		// tolerated; losing a large share means the file is badly damaged.
+		if limit := max(3, (len(x.Pages)+n)/10); n > limit {
+			return nil, unsupported("%d page objects are missing", n)
+		}
+		sort.Ints(w.skipped)
+		x.Skipped = w.skipped
+	}
 	return x, nil
 }
 
 type walker struct {
 	d *doc
 
-	mu   sync.Mutex
-	seen map[int]bool
+	mu      sync.Mutex
+	seen    map[int]bool
+	skipped []int
 }
 
 // walkers bounds the parallel preads while resolving a page tree: pages are
@@ -98,6 +112,11 @@ func (w *walker) node(v any, res any, depth int) ([]Page, error) {
 		w.mu.Unlock()
 		if dup {
 			return nil, unsupported("page tree cycle")
+		}
+	}
+	if r, ok := v.(ref); ok {
+		if e, in := w.d.xref[r.num]; !in || e.typ == 0 {
+			return nil, fmt.Errorf("%w: %w: object %d is not in the xref", ErrUnsupported, errDangling, r.num)
 		}
 	}
 	dc, err := w.d.derefDict(v)
@@ -158,6 +177,12 @@ func (w *walker) kids(arr array, res any, depth int) ([]Page, error) {
 	var out []Page
 	for i := range arr {
 		if errs[i] != nil {
+			if r, ok := arr[i].(ref); ok && errors.Is(errs[i], errDangling) {
+				w.mu.Lock()
+				w.skipped = append(w.skipped, r.num)
+				w.mu.Unlock()
+				continue
+			}
 			return nil, errs[i]
 		}
 		out = append(out, results[i]...)

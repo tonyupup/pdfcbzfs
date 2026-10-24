@@ -194,3 +194,84 @@ func TestUnsupportedLogSaysWhatThePageHolds(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// breakPageObjects turns the "obj" keyword of the given 1-based pages into
+// "xxx" (same length, so every xref offset stays valid): the xref entry then
+// points at something that is not the object it names.
+func breakPageObjects(pdf []byte, pages ...int) []byte {
+	out := append([]byte{}, pdf...)
+	var heads []int
+	for from := 0; ; {
+		i := bytes.Index(out[from:], []byte("/Type /Page "))
+		if i < 0 {
+			break
+		}
+		i += from
+		heads = append(heads, bytes.LastIndex(out[:i], []byte("obj")))
+		from = i + 1
+	}
+	for _, p := range pages {
+		copy(out[heads[p-1]:], "xxx")
+	}
+	return out
+}
+
+func TestDanglingPagesAreSkipped(t *testing.T) {
+	var j [][]byte
+	for i := 0; i < 5; i++ {
+		j = append(j, testpdf.JPEG(i, 16+i, 16))
+	}
+	pdf := breakPageObjects(testpdf.Classic(j, testpdf.Opts{}), 2, 5)
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Pages) != 3 || len(x.Skipped) != 2 {
+		t.Fatalf("pages=%d skipped=%v", len(x.Pages), x.Skipped)
+	}
+	r := bytes.NewReader(pdf)
+	for k, want := range []int{0, 2, 3} { // surviving pages, in order
+		buf := make([]byte, x.Pages[k].Size)
+		if n, _ := x.ReadImageAt(r, k, buf, 0); int64(n) != x.Pages[k].Size || !bytes.Equal(buf, j[want]) {
+			t.Fatalf("page %d is not original page %d", k, want+1)
+		}
+	}
+}
+
+func TestTooManyDanglingPagesRejectsTheFile(t *testing.T) {
+	var j [][]byte
+	for i := 0; i < 12; i++ {
+		j = append(j, testpdf.JPEG(i, 16, 16))
+	}
+	pdf := breakPageObjects(testpdf.Classic(j, testpdf.Opts{}), 1, 2, 3, 4, 5)
+	if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); !errors.Is(err, pdfidx.ErrUnsupported) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestUndefinedPageReferenceIsSkipped(t *testing.T) {
+	var j [][]byte
+	for i := 0; i < 3; i++ {
+		j = append(j, testpdf.JPEG(i, 16, 16))
+	}
+	pdf := testpdf.Classic(j, testpdf.Opts{})
+	// Point the first kid at an object number the file does not have, keeping
+	// the length so the xref offsets stay valid.
+	i := bytes.Index(pdf, []byte("/Kids [")) + len("/Kids [")
+	k := i
+	for pdf[k] >= '0' && pdf[k] <= '9' {
+		k++
+	}
+	want := 0
+	for n := i; n < k; n++ {
+		pdf[n] = '9'
+		want = want*10 + 9
+	}
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Pages) != 2 || len(x.Skipped) != 1 || x.Skipped[0] != want {
+		t.Fatalf("pages=%d skipped=%v want %d", len(x.Pages), x.Skipped, want)
+	}
+}

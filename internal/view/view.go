@@ -196,6 +196,9 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(idx.Skipped) > 0 {
+		c.cfg.Logf("pdf %s: skipped %d missing page object(s) %v", path, len(idx.Skipped), idx.Skipped)
+	}
 	name := path[strings.LastIndexByte(path, '/')+1:]
 	stem, _ := IsPDFName(name)
 	p := &PDF{

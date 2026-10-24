@@ -18,6 +18,10 @@ import (
 // convertible"; callers should then expose the file unchanged.
 var ErrUnsupported = errors.New("pdfidx: unsupported PDF")
 
+// errDangling marks a reference to an object that is absent from the file or
+// whose xref entry points somewhere else. Page-tree walking skips such pages.
+var errDangling = errors.New("object missing or xref points to the wrong place")
+
 func unsupported(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrUnsupported, fmt.Sprintf(format, a...))
 }
@@ -179,10 +183,13 @@ func (d *doc) resolve(num int) (o any, gen int, streamOff int64, objNum int, err
 	case 1:
 		n, g, v, so, err := d.readObjAt(e.a)
 		if err != nil {
+			if errors.Is(err, ErrUnsupported) {
+				err = fmt.Errorf("%w: %w: object %d at offset %d: %v", ErrUnsupported, errDangling, num, e.a, err)
+			}
 			return nil, 0, -1, num, err
 		}
 		if n != num {
-			return nil, 0, -1, num, unsupported("xref points to object %d, wanted %d", n, num)
+			return nil, 0, -1, num, fmt.Errorf("%w: %w: xref points to object %d, wanted %d", ErrUnsupported, errDangling, n, num)
 		}
 		return v, g, so, num, nil
 	case 2:

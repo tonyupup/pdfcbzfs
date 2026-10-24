@@ -30,6 +30,13 @@ other filters, damaged files, wrong
 or missing password) is **passed through untouched** as a normal `.pdf`. Run
 with `-v` to see why a given PDF was passed through.
 
+A few damaged pages are tolerated: if a page object is missing from the file
+or its xref entry points at the wrong place (for example an ad page cut out of
+the file), that page is left out of the CBZ and `-v` logs the object numbers.
+More than 3 pages (or 10% of the book) missing counts as a damaged file and
+the PDF is passed through. Junk before the `%PDF-` header and large padding
+after `%%EOF` are also accepted.
+
 ## Presentation
 
 Chosen with `-o pdf_mode=...`:
