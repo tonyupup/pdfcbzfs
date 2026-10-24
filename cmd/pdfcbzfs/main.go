@@ -14,9 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tonyupup/pdfcbzfs/internal/fusefs"
 	"github.com/tonyupup/pdfcbzfs/internal/view"
@@ -193,6 +195,12 @@ func run(c *config) {
 	if ready != nil {
 		ready.Close() // EOF with no data == success
 	}
+	// hand freed heap back to the OS so an idle daemon does not hold peak RSS
+	go func() {
+		for range time.Tick(30 * time.Second) {
+			debug.FreeOSMemory()
+		}
+	}()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

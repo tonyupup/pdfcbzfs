@@ -25,7 +25,6 @@ type Index struct {
 	Pages []Page
 
 	crypt *crypt
-	cache *imgCache
 }
 
 // Encrypted reports whether image reads go through a decryption step.
@@ -58,7 +57,7 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 	if !ok {
 		return nil, unsupported("no catalog")
 	}
-	x = &Index{crypt: d.crypt, cache: newImgCache(64 << 20)}
+	x = &Index{crypt: d.crypt}
 	w := &walker{d: d, seen: map[int]bool{}}
 	x.Pages, err = w.node(root["Pages"], nil, 0)
 	if err != nil {
@@ -300,7 +299,7 @@ func (x *Index) ReadImageAt(r io.ReaderAt, page int, p []byte, off int64) (int, 
 }
 
 func (x *Index) image(r io.ReaderAt, page int) ([]byte, error) {
-	if b, ok := x.cache.get(page); ok {
+	if b, ok := imgs.get(x, page); ok {
 		return b, nil
 	}
 	pg := x.Pages[page]
@@ -330,9 +329,13 @@ func (x *Index) image(r io.ReaderAt, page int) ([]byte, error) {
 			return nil, fmt.Errorf("pdfidx: PNG size %d, expected %d", len(raw), pg.Size)
 		}
 	}
-	x.cache.put(page, raw)
+	imgs.put(x, page, raw)
 	return raw, nil
 }
+
+// imgs is one byte-bounded LRU shared by every Index, so memory stays flat
+// however many PDFs a library holds (a per-Index cache grew with PDF count).
+var imgs = newImgCache(32 << 20)
 
 // imgCache is a byte-bounded LRU of decrypted images.
 type imgCache struct {
@@ -340,41 +343,47 @@ type imgCache struct {
 	max   int
 	used  int
 	ll    *list.List
-	items map[int]*list.Element
+	items map[cacheKey]*list.Element
+}
+
+type cacheKey struct {
+	x    *Index
+	page int
 }
 
 type cacheItem struct {
-	page int
-	b    []byte
+	key cacheKey
+	b   []byte
 }
 
 func newImgCache(max int) *imgCache {
-	return &imgCache{max: max, ll: list.New(), items: map[int]*list.Element{}}
+	return &imgCache{max: max, ll: list.New(), items: map[cacheKey]*list.Element{}}
 }
 
-func (c *imgCache) get(page int) ([]byte, bool) {
+func (c *imgCache) get(x *Index, page int) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e, ok := c.items[page]; ok {
+	if e, ok := c.items[cacheKey{x, page}]; ok {
 		c.ll.MoveToFront(e)
 		return e.Value.(*cacheItem).b, true
 	}
 	return nil, false
 }
 
-func (c *imgCache) put(page int, b []byte) {
+func (c *imgCache) put(x *Index, page int, b []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.items[page]; ok {
+	k := cacheKey{x, page}
+	if _, ok := c.items[k]; ok {
 		return
 	}
-	c.items[page] = c.ll.PushFront(&cacheItem{page, b})
+	c.items[k] = c.ll.PushFront(&cacheItem{k, b})
 	c.used += len(b)
 	for c.used > c.max && c.ll.Len() > 1 {
 		e := c.ll.Back()
 		it := e.Value.(*cacheItem)
 		c.ll.Remove(e)
-		delete(c.items, it.page)
+		delete(c.items, it.key)
 		c.used -= len(it.b)
 	}
 }
