@@ -43,6 +43,15 @@ it is left alone (logged once) and probed as soon as the control file is gone.
 and masks; other arrays, or an inverted JPEG, are passed through and `-v`
 prints the array.
 
+An **image-dominant page** is extracted too: one image that covers at least
+70% of the page, with only furniture around it (a background, frames or rules
+in the margins, a page number of up to 12 visible bytes, any amount of invisible
+OCR text, at most 80 vector paints). Word and InDesign exports of comics look
+like this. Nothing may be painted over the image after it is drawn, the image
+must be unrotated, unflipped and not cropped by a smaller clip, and the page
+not rotated. The furniture is dropped on purpose; `-v` says which of these
+conditions failed when a page is not accepted.
+
 A page may list any number of XObjects (books often share one resource
 dictionary of every image across many pages) as long as its content stream
 draws exactly one, an image, and nothing else (only graphics state, colour and

@@ -197,3 +197,38 @@ func TestUnencryptedPDFPassesNoPasswordToTheRenderer(t *testing.T) {
 		t.Fatalf("an unencrypted PDF must not pass a password: %q", fr.calls[0].Password)
 	}
 }
+
+// A page that is an image with a frame and a page number around it needs no
+// renderer: its image is extracted, so a book made of such pages costs no CPU.
+func TestImageDominantPagesNeverCallTheRenderer(t *testing.T) {
+	dir := t.TempDir()
+	fr := &fakeRenderer{available: true}
+	var j [][]byte
+	for i := 0; i < 4; i++ {
+		j = append(j, testpdf.JPEG(i, 16, 16))
+	}
+	content := "1 g 0 0 200 300 re f 0.8 g 0 0 200 8 re f 0.8 g 0 292 200 8 re f q 180 0 0 270 10 20 cm /Im0 Do Q BT /F1 9 Tf 95 3 Td (7) Tj ET\n"
+	pdfBytes := testpdf.Classic(j, testpdf.Opts{PageAttrs: "/MediaBox [0 0 200 300]", UnusedImage: 1,
+		Content: map[int]string{1: content, 2: content, 3: content, 4: content}})
+	p, st := write(t, dir, "comic.pdf", pdfBytes)
+	// page 1 lists a second XObject, so it is judged by the content (new rule);
+	// if that rule did not hold, the probe would draw page 1 and calls would not be 0
+	v := view.NewCache(view.Config{Render: fr}).Probe(p, st)
+	if v == nil {
+		t.Fatal("must be converted")
+	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("the renderer was called %d times for pages that are plain images", len(fr.calls))
+	}
+	f, _ := os.Open(p)
+	defer f.Close()
+	all := make([]byte, v.Parts[0].Size())
+	if n, err := v.Parts[0].ReadAt(f, all, 0); n != len(all) {
+		t.Fatalf("read %d of %d: %v", n, len(all), err)
+	}
+	for i, img := range j {
+		if !bytes.Contains(all, img) {
+			t.Fatalf("page %d image is not in the archive as it is", i+1)
+		}
+	}
+}

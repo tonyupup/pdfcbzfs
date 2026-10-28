@@ -238,7 +238,7 @@ func (w *walker) node(v any, inh inherited, depth int) ([]Page, error) {
 		}
 		return w.kids(arr, inh, depth)
 	}
-	pg, err := w.page(dc, inh.res)
+	pg, err := w.page(dc, inh)
 	if err != nil {
 		if r, ok := v.(ref); ok {
 			err = fmt.Errorf("page object %d: %w", r.num, err)
@@ -297,9 +297,9 @@ func (w *walker) kids(arr array, inh inherited, depth int) ([]Page, error) {
 	return out, nil
 }
 
-func (w *walker) page(pd dict, res any) (Page, error) {
+func (w *walker) page(pd dict, inh inherited) (Page, error) {
 	var zero Page
-	rd, err := w.d.derefDict(res)
+	rd, err := w.d.derefDict(inh.res)
 	if err != nil {
 		return zero, unsupported("page: no resources")
 	}
@@ -308,8 +308,21 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 		// Several XObjects are fine when one is the page image and the
 		// content stream draws nothing else (the rest is never shown).
 		only, ok := w.soleDrawnImage(pd, xo)
+		why := ""
+		if !ok && len(xo) > 0 {
+			// An image that fills the page, with only furniture around it
+			// (frames, a page number), is the page too.
+			var dom dict
+			if dom, why = w.dominantImage(pd, inh, rd); dom != nil {
+				only, ok = dom, true
+			}
+		}
 		if !ok {
-			return zero, unsupported("page needs exactly one XObject (%s; %s)", w.describeXObjects(xo), w.describeContent(pd))
+			msg := fmt.Sprintf("%s; %s", w.describeXObjects(xo), w.describeContent(pd))
+			if why != "" {
+				msg += "; not image-dominant: " + why
+			}
+			return zero, unsupported("page needs exactly one XObject (%s)", msg)
 		}
 		xo = only
 	}
@@ -973,17 +986,8 @@ func (w *walker) box(v any) (x0, y0, x1, y1 float64, ok bool) {
 
 // pageSize is the visible page size in points.
 func (w *walker) pageSize(pd dict, inh inherited) (wpt, hpt float64) {
-	x0, y0, x1, y1, ok := w.box(inh.media)
-	if !ok {
-		x0, y0, x1, y1 = 0, 0, 612, 792
-	}
-	if cx0, cy0, cx1, cy1, ok := w.box(inh.crop); ok {
-		x0, y0, x1, y1 = max(x0, cx0), max(y0, cy0), min(x1, cx1), min(y1, cy1)
-		if x1 <= x0 || y1 <= y0 {
-			x0, y0, x1, y1, _ = w.box(inh.crop)
-		}
-	}
-	wpt, hpt = x1-x0, y1-y0
+	pr := w.pageRect(inh)
+	wpt, hpt = pr.x1-pr.x0, pr.y1-pr.y0
 	if v, err := w.d.deref(inh.rotate); err == nil {
 		if r, ok := v.(int64); ok && (r/90)%2 != 0 {
 			wpt, hpt = hpt, wpt

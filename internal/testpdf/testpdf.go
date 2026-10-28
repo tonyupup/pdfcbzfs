@@ -34,12 +34,14 @@ type Opts struct {
 	NestedTree     bool // page tree with intermediate /Pages nodes
 	ExtraImage     int  // 1-based page that gets a second image (unsupported)
 
-	WithContents bool   // every page gets a content stream that draws /Im0
-	FormPage     int    // 1-based page that also lists a Form XObject /Fm0
-	FormDrawn    bool   // ... and whose content stream invokes it
-	UnusedImage  int    // 1-based page whose resources also list a second image /Im1
-	PageAttrs    string // appended to every page dict, e.g. "/MediaBox [0 0 612 792] /Rotate 90" (a later key wins)
-	PageExtra    string // appended to the content stream of FormPage (or page 1)
+	WithContents bool           // every page gets a content stream that draws /Im0
+	FormPage     int            // 1-based page that also lists a Form XObject /Fm0
+	FormDrawn    bool           // ... and whose content stream invokes it
+	UnusedImage  int            // 1-based page whose resources also list a second image /Im1
+	Content      map[int]string // 1-based page -> its content stream (implies WithContents); /Im0 is the page image
+	FormContent  string         // stream of the form /Fm0 (default draws a small square)
+	PageAttrs    string         // appended to every page dict, e.g. "/MediaBox [0 0 612 792] /Rotate 90" (a later key wins)
+	PageExtra    string         // appended to the content stream of FormPage (or page 1)
 }
 
 type builder struct {
@@ -149,7 +151,8 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 	l := plan(n, o)
 	b.writeTree(l, o, n)
 	contentBase, formObj := 0, 0
-	if o.WithContents {
+	if o.WithContents || len(o.Content) > 0 {
+		o.WithContents = true
 		contentBase = l.next
 		l.next += n
 	}
@@ -166,7 +169,7 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 				parent = l.tree[1]
 			}
 		}
-		if o.WithContents || o.FormPage > 0 || o.UnusedImage > 0 {
+		if o.WithContents || o.FormPage > 0 || o.UnusedImage > 0 || len(o.Content) > 0 {
 			form, contents := 0, 0
 			if o.FormPage == i+1 {
 				form = formObj
@@ -174,6 +177,9 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 			if o.WithContents {
 				contents = contentBase + i
 				c := "q 16 0 0 16 0 0 cm /Im0 Do Q\n"
+				if custom, ok := o.Content[i+1]; ok {
+					c = custom
+				}
 				if form > 0 && o.FormDrawn {
 					c += "/Fm0 Do\n"
 				}
@@ -182,7 +188,11 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 				}
 				b.stream(contents, "", []byte(c), 0)
 			}
-			b.obj(l.pageObj[i], pageBodyEx(parent, l.imgObj[i], contents, form, o.UnusedImage == i+1))
+			body := pageBodyEx(parent, l.imgObj[i], contents, form, o.UnusedImage == i+1)
+			if o.PageAttrs != "" {
+				body = strings.Replace(body, "/MediaBox [0 0 16 16]", o.PageAttrs, 1)
+			}
+			b.obj(l.pageObj[i], body)
 		} else {
 			body := pageBody(parent, l.imgObj[i], o.ExtraImage == i+1)
 			if o.PageAttrs != "" {
@@ -197,7 +207,11 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 		b.stream(l.imgObj[i], imageDict(j), j, ref)
 	}
 	if formObj > 0 {
-		b.stream(formObj, "/Type /XObject /Subtype /Form /BBox [0 0 16 16]", []byte("0 g 0 0 4 4 re f"), 0)
+		form := "0 g 0 0 4 4 re f"
+		if o.FormContent != "" {
+			form = o.FormContent
+		}
+		b.stream(formObj, "/Type /XObject /Subtype /Form /BBox [0 0 16 16]", []byte(form), 0)
 	}
 	size := l.next
 	if o.IndirectLength {
