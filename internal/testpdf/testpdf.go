@@ -336,6 +336,9 @@ func deflate(b []byte) []byte {
 	return out.Bytes()
 }
 
+// Deflate zlib-compresses b, as a /FlateDecode stream holds it.
+func Deflate(b []byte) []byte { return deflate(b) }
+
 // Raw describes a Flate-compressed raw-sample image. Rows are packed and
 // padded to a byte boundary, like in a PDF image stream.
 type Raw struct {
@@ -375,7 +378,15 @@ func ClassicRaw(imgs []Raw) []byte {
 		data := deflate(im.Rows)
 		if im.Data != nil {
 			data = im.Data
-			d = strings.Replace(d, "/Filter /FlateDecode", "/Filter /"+im.Filter+" /DecodeParms << "+im.Parms+" >>", 1)
+			filt := "/" + strings.ReplaceAll(im.Filter, " ", " /") // "A B" becomes an array
+			if strings.Contains(im.Filter, " ") {
+				filt = "[" + filt + "]"
+			}
+			parms := ""
+			if im.Parms != "" {
+				parms = " /DecodeParms << " + im.Parms + " >>"
+			}
+			d = strings.Replace(d, "/Filter /FlateDecode", "/Filter "+filt+parms, 1)
 		}
 		if im.Decode != "" {
 			d += " /Decode " + im.Decode

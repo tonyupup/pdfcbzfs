@@ -2,12 +2,14 @@ package pdfidx
 
 import (
 	"bytes"
+	"compress/zlib"
 	"container/list"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Page describes the single JPEG image of one PDF page.
@@ -19,7 +21,8 @@ type Page struct {
 	Gen  int
 	Ext  string // "jpg" (embedded JPEG) or "png" (synthesised from raw samples)
 
-	png *pngSpec
+	png     *pngSpec
+	inflate bool // JPEG stored under an extra Flate layer (/Filter [Flate DCT])
 }
 
 // Index is the result of scanning a PDF. It is safe for concurrent use.
@@ -94,7 +97,13 @@ type walker struct {
 	mu      sync.Mutex
 	seen    map[int]bool
 	skipped []int
+
+	inflated atomic.Int64 // compressed bytes read to size Flate-wrapped JPEGs
 }
+
+// maxInflateIndex bounds the image data read at index time to learn the size
+// of Flate-wrapped JPEGs (their length is only known after inflating).
+const maxInflateIndex = 256 << 20
 
 // walkers bounds the parallel preads while resolving a page tree: pages are
 // scattered through the file between their images, so on a cold disk or a
@@ -232,11 +241,15 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 	if err != nil {
 		return zero, err
 	}
-	if len(names) != 1 {
+	chain := len(names) == 2 && isFlate(names[0]) && isDCT(names[1])
+	if chain && parms[0] != nil && intOf(parms[0], "Predictor", 1) > 1 {
+		chain = false
+	}
+	if len(names) != 1 && !chain {
 		return zero, unsupported("image filters %v", names)
 	}
 	mask := id["ImageMask"] == true
-	invert, err := w.decodeArray(id, mask)
+	invert, adobeInv, err := w.decodeArray(id, mask)
 	if err != nil {
 		return zero, err
 	}
@@ -256,10 +269,26 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 	if so+l > w.d.size {
 		return zero, unsupported("image stream past end of file")
 	}
+	if chain {
+		return w.flateJPEG(id, iref.num, gen, so, l, adobeInv)
+	}
 	switch names[0] {
 	case "DCTDecode", "DCT":
-		if cs, ok := id["ColorSpace"].(name); ok && cs == "DeviceCMYK" {
-			return zero, unsupported("CMYK JPEG")
+		cmyk := id["ColorSpace"] == name("DeviceCMYK")
+		if cmyk {
+			// Adobe CMYK JPEGs hold inverted values; a viewer undoes that from
+			// the file's Adobe marker, just as the PDF's /Decode [1 0 ...] does,
+			// so the bytes can be shown as they are. Anything else would not.
+			if !adobeInv || w.d.crypt != nil {
+				return zero, unsupported("CMYK JPEG")
+			}
+			ok, err := jpegHasAdobe(func(off int64, n int) ([]byte, error) { return w.d.readAt(so+off, n) }, l)
+			if err != nil {
+				return zero, err
+			}
+			if !ok {
+				return zero, unsupported("CMYK JPEG without an Adobe marker")
+			}
 		}
 		size := l
 		if w.d.crypt != nil {
@@ -305,7 +334,7 @@ func (x *Index) ReadImageAt(r io.ReaderAt, page int, p []byte, off int64) (int, 
 	if off >= pg.Size {
 		return 0, io.EOF
 	}
-	if !x.Encrypted() && pg.png == nil {
+	if !x.Encrypted() && pg.png == nil && !pg.inflate {
 		want := int64(len(p))
 		short := false
 		if want > pg.Size-off {
@@ -344,6 +373,14 @@ func (x *Index) image(r io.ReaderAt, page int) ([]byte, error) {
 	if x.crypt != nil {
 		if raw, err = x.crypt.decryptStream(pg.Num, pg.Gen, raw); err != nil {
 			return nil, err
+		}
+	}
+	if pg.inflate {
+		if raw, err = inflateJPEG(raw); err != nil {
+			return nil, err
+		}
+		if int64(len(raw)) != pg.Size {
+			return nil, fmt.Errorf("pdfidx: inflated JPEG is %d bytes, expected %d", len(raw), pg.Size)
 		}
 	}
 	if pg.png != nil {
@@ -619,14 +656,14 @@ func plainDraw(b []byte) (do []string, ok bool) {
 // array ([1 0] per component) is returned as invert, which only raw-sample
 // (Flate/CCITT) gray and RGB images can honour. Anything else is unsupported,
 // and the message shows the array so the log says what the file holds.
-func (w *walker) decodeArray(id dict, mask bool) (invert bool, err error) {
+func (w *walker) decodeArray(id dict, mask bool) (invert, adobeInv bool, err error) {
 	dv, ok := id["Decode"]
 	if !ok {
-		return false, nil
+		return false, false, nil
 	}
 	a, _ := w.d.deref(dv)
 	arr, _ := a.(array)
-	bad := func() (bool, error) { return false, unsupported("image has /Decode %v", arr) }
+	bad := func() (bool, bool, error) { return false, false, unsupported("image has /Decode %v", arr) }
 	if len(arr) == 0 || len(arr)%2 != 0 {
 		return bad()
 	}
@@ -637,10 +674,14 @@ func (w *walker) decodeArray(id dict, mask bool) (invert bool, err error) {
 	}
 	switch {
 	case identity:
-		return false, nil
+		return false, false, nil
 	case inverted && mask:
-		return true, nil
+		return true, false, nil
 	case inverted:
+		if names, _, err := w.d.filters(id); err == nil && len(arr) == 8 && id["ColorSpace"] == name("DeviceCMYK") &&
+			((len(names) == 1 && isDCT(names[0])) || (len(names) == 2 && isFlate(names[0]) && isDCT(names[1]))) {
+			return false, true, nil // Adobe CMYK JPEG, checked against its marker later
+		}
 		// only raw samples can be flipped; a JPEG would show inverted colours
 		if names, _, err := w.d.filters(id); err != nil || len(names) != 1 || (names[0] != "FlateDecode" && names[0] != "Fl" && names[0] != "CCITTFaxDecode" && names[0] != "CCF") {
 			return bad()
@@ -650,17 +691,115 @@ func (w *walker) decodeArray(id dict, mask bool) (invert bool, err error) {
 				return bad()
 			}
 		}
-		return true, nil
+		return true, false, nil
 	}
 	// Indexed images often carry the identity [0 2^bpc-1]
 	if len(arr) == 2 && numIs(arr[0], 0) {
 		if cs, _ := w.d.deref(id["ColorSpace"]); cs != nil {
 			if ca, ok := cs.(array); ok && len(ca) > 0 && (name2(ca[0]) == "Indexed" || name2(ca[0]) == "I") {
 				if bpc := intOf(id, "BitsPerComponent", 0); bpc >= 1 && bpc <= 8 && numIs(arr[1], 1<<bpc-1) {
-					return false, nil
+					return false, false, nil
 				}
 			}
 		}
 	}
 	return bad()
+}
+
+func isFlate(n string) bool { return n == "FlateDecode" || n == "Fl" }
+func isDCT(n string) bool   { return n == "DCTDecode" || n == "DCT" }
+
+// flateJPEG sizes a JPEG stored under an extra Flate layer. The size is only
+// known after inflating, so the stream is read now (within a per-PDF budget)
+// and inflated again whenever a reader needs the bytes.
+func (w *walker) flateJPEG(id dict, num, gen int, so, l int64, adobeInv bool) (Page, error) {
+	var zero Page
+	if l > 64<<20 || w.inflated.Add(l) > maxInflateIndex {
+		return zero, unsupported("too much Flate-wrapped JPEG data to size at index time")
+	}
+	raw, err := w.d.readAt(so, int(l))
+	if err != nil {
+		return zero, err
+	}
+	if w.d.crypt != nil {
+		if raw, err = w.d.crypt.decryptStream(num, gen, raw); err != nil {
+			return zero, err
+		}
+	}
+	jpg, err := inflateJPEG(raw)
+	if err != nil {
+		return zero, err
+	}
+	if id["ColorSpace"] == name("DeviceCMYK") {
+		if !adobeInv {
+			return zero, unsupported("CMYK JPEG")
+		}
+		ok, err := jpegHasAdobe(func(off int64, n int) ([]byte, error) {
+			if off+int64(n) > int64(len(jpg)) {
+				return nil, unsupported("short JPEG")
+			}
+			return jpg[off : off+int64(n)], nil
+		}, int64(len(jpg)))
+		if err != nil {
+			return zero, err
+		}
+		if !ok {
+			return zero, unsupported("CMYK JPEG without an Adobe marker")
+		}
+	}
+	return Page{Off: so + w.d.base, Len: l, Size: int64(len(jpg)), Num: num, Gen: gen, Ext: "jpg", inflate: true}, nil
+}
+
+// inflateJPEG undoes the outer Flate layer and checks for a JPEG inside.
+func inflateJPEG(raw []byte) ([]byte, error) {
+	zr, err := zlib.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, unsupported("flate: %v", err)
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, maxStreamBytes+1))
+	if err != nil && len(out) == 0 {
+		return nil, unsupported("flate: %v", err)
+	}
+	if len(out) > maxStreamBytes {
+		return nil, unsupported("inflated JPEG too large")
+	}
+	if len(out) < 4 || out[0] != 0xFF || out[1] != 0xD8 {
+		return nil, unsupported("Flate stream does not hold a JPEG")
+	}
+	return out, nil
+}
+
+// jpegHasAdobe walks the JPEG's marker segments up to the scan looking for
+// the Adobe APP14 marker. read returns n bytes at off (relative to the JPEG).
+func jpegHasAdobe(read func(off int64, n int) ([]byte, error), total int64) (bool, error) {
+	if b, err := read(0, 2); err != nil || b[0] != 0xFF || b[1] != 0xD8 {
+		return false, err
+	}
+	for pos := int64(2); pos+4 <= total; {
+		h, err := read(pos, 4)
+		if err != nil {
+			return false, err
+		}
+		if h[0] != 0xFF {
+			return false, nil
+		}
+		m := h[1]
+		if m == 0xFF { // fill byte
+			pos++
+			continue
+		}
+		if m == 0xDA || m == 0xD9 { // scan or end: no more headers
+			return false, nil
+		}
+		n := int64(h[2])<<8 | int64(h[3])
+		if n < 2 {
+			return false, nil
+		}
+		if m == 0xEE && n >= 14 {
+			a, err := read(pos+4, 5)
+			return err == nil && string(a) == "Adobe", err
+		}
+		pos += 2 + n
+	}
+	return false, nil
 }

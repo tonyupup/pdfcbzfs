@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -396,6 +397,90 @@ func TestZeroFilledTailIsExplained(t *testing.T) {
 	copy(pdf, "%PDF-1.4\n")
 	_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
 	if err == nil || !strings.Contains(err.Error(), "all zeros") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func cmykPDF(t *testing.T, jpegFile, decode string, wrap bool) ([]byte, []byte) {
+	t.Helper()
+	jpg, err := os.ReadFile(filepath.Join("testdata", jpegFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	im := testpdf.Raw{W: 24, H: 16, Bpc: 8, ColorSpace: "/DeviceCMYK", Decode: decode, Filter: "DCTDecode", Data: jpg}
+	if wrap {
+		im.Filter, im.Data = "FlateDecode DCTDecode", testpdf.Deflate(jpg)
+	}
+	return testpdf.ClassicRaw([]testpdf.Raw{im}), jpg
+}
+
+func TestAdobeCMYKJPEGIsCopiedAsIs(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		pdf, jpg := cmykPDF(t, "cmyk-adobe.jpg", "[1 0 1 0 1 0 1 0]", wrap)
+		x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+		if err != nil {
+			t.Fatalf("wrap=%v: %v", wrap, err)
+		}
+		if x.Pages[0].Ext != "jpg" || !bytes.Equal(readPNGBytes(t, pdf, x), jpg) {
+			t.Fatalf("wrap=%v: page is not the original JPEG", wrap)
+		}
+	}
+}
+
+func TestCMYKJPEGWithoutAdobeInversionIsUnsupported(t *testing.T) {
+	for name, c := range map[string]struct {
+		file, decode, want string
+	}{
+		"no adobe marker": {"cmyk-noadobe.jpg", "[1 0 1 0 1 0 1 0]", "without an Adobe marker"},
+		"no decode":       {"cmyk-adobe.jpg", "", "CMYK JPEG"},
+		"identity decode": {"cmyk-adobe.jpg", "[0 1 0 1 0 1 0 1]", "CMYK JPEG"},
+	} {
+		for _, wrap := range []bool{false, true} {
+			pdf, _ := cmykPDF(t, c.file, c.decode, wrap)
+			_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+			if !errors.Is(err, pdfidx.ErrUnsupported) || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s wrap=%v: err = %v", name, wrap, err)
+			}
+		}
+	}
+}
+
+func TestFlateWrappedJPEG(t *testing.T) {
+	var jpgs [][]byte
+	var imgs []testpdf.Raw
+	for i := 0; i < 3; i++ {
+		j := testpdf.JPEG(i, 16, 16)
+		jpgs = append(jpgs, j)
+		imgs = append(imgs, testpdf.Raw{W: 16, H: 16, Bpc: 8, ColorSpace: "/DeviceGray",
+			Filter: "FlateDecode DCTDecode", Data: testpdf.Deflate(j)})
+	}
+	pdf := testpdf.ClassicRaw(imgs)
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(pdf)
+	for i := range jpgs {
+		pg := x.Pages[i]
+		if pg.Ext != "jpg" || pg.Size != int64(len(jpgs[i])) {
+			t.Fatalf("page %d: ext %q size %d, want jpg %d", i, pg.Ext, pg.Size, len(jpgs[i]))
+		}
+		// read in two pieces at an offset: the inflated bytes must line up
+		buf := make([]byte, pg.Size)
+		half := len(buf) / 2
+		n1, _ := x.ReadImageAt(r, i, buf[:half], 0)
+		n2, _ := x.ReadImageAt(r, i, buf[half:], int64(half))
+		if n1+n2 != len(buf) || !bytes.Equal(buf, jpgs[i]) {
+			t.Fatalf("page %d: bytes differ", i)
+		}
+	}
+}
+
+func TestFlateStreamThatIsNotAJPEGIsUnsupported(t *testing.T) {
+	im := testpdf.Raw{W: 16, H: 16, Bpc: 8, ColorSpace: "/DeviceGray", Filter: "FlateDecode DCTDecode",
+		Data: testpdf.Deflate([]byte("definitely not a jpeg......."))}
+	pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+	if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); !errors.Is(err, pdfidx.ErrUnsupported) {
 		t.Fatalf("err = %v", err)
 	}
 }
