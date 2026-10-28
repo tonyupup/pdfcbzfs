@@ -38,6 +38,7 @@ type Opts struct {
 	FormPage     int    // 1-based page that also lists a Form XObject /Fm0
 	FormDrawn    bool   // ... and whose content stream invokes it
 	UnusedImage  int    // 1-based page whose resources also list a second image /Im1
+	PageAttrs    string // appended to every page dict, e.g. "/MediaBox [0 0 612 792] /Rotate 90" (a later key wins)
 	PageExtra    string // appended to the content stream of FormPage (or page 1)
 }
 
@@ -183,7 +184,11 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 			}
 			b.obj(l.pageObj[i], pageBodyEx(parent, l.imgObj[i], contents, form, o.UnusedImage == i+1))
 		} else {
-			b.obj(l.pageObj[i], pageBody(parent, l.imgObj[i], o.ExtraImage == i+1))
+			body := pageBody(parent, l.imgObj[i], o.ExtraImage == i+1)
+			if o.PageAttrs != "" {
+				body = strings.Replace(body, "/MediaBox [0 0 16 16]", o.PageAttrs, 1)
+			}
+			b.obj(l.pageObj[i], body)
 		}
 		ref := 0
 		if o.IndirectLength {

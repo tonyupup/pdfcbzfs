@@ -35,9 +35,10 @@ var padding = []byte{
 
 // crypt is the standard security handler state for one document.
 type crypt struct {
-	key []byte // file encryption key
-	v   int
-	stm method
+	password []byte // the candidate that opened the file (nil: empty)
+	key      []byte // file encryption key
+	v        int
+	stm      method
 }
 
 type encParams struct {
@@ -133,7 +134,7 @@ func (d *doc) setupCrypt(passwords [][]byte) error {
 	}
 	for _, pw := range cands {
 		if key := ep.tryPassword(pw); key != nil {
-			d.crypt = &crypt{key: key, v: ep.v, stm: ep.stm}
+			d.crypt = &crypt{password: pw, key: key, v: ep.v, stm: ep.stm}
 			return nil
 		}
 	}

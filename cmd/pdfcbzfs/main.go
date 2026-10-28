@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tonyupup/pdfcbzfs/internal/fusefs"
+	"github.com/tonyupup/pdfcbzfs/internal/render"
 	"github.com/tonyupup/pdfcbzfs/internal/view"
 )
 
@@ -185,6 +186,25 @@ func run(c *config) {
 	if c.verbose {
 		cfg.Logf = log.Printf
 	}
+	// Pages that cannot be extracted are drawn by the pdfcbzfs-render helper
+	// when it is installed; without it those PDFs simply stay PDFs.
+	// Rendering a book allocates short-lived page buffers; collect early so
+	// the daemon's footprint follows what is live (a few tens of MB), not the
+	// default 100% growth over it.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(40)
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(192 << 20)
+	}
+	workers, _ := strconv.Atoi(os.Getenv("PDFCBZFS_RENDER_WORKERS"))
+	rs := render.New(render.Config{CacheDir: renderCacheDir(), MaxCache: renderCacheMax(), Workers: workers})
+	cfg.Render = rs
+	if rs.Available() {
+		log.Printf("pdfcbzfs: renderer available, pages that cannot be extracted are drawn")
+	} else {
+		log.Printf("pdfcbzfs: no renderer (%v); PDFs with such pages stay PDFs", rs.Why())
+	}
 	f, err := fusefs.New(c.lower, cfg)
 	if err != nil {
 		fail("lower: %v", err)
@@ -213,6 +233,26 @@ func run(c *config) {
 	}()
 	log.Printf("pdfcbzfs: %s -> %s (pages_per_cbz=%d, pdf_mode=%s)", c.lower, c.mountpoint, c.pages, c.mode)
 	srv.Wait()
+}
+
+// renderCacheDir is where rendered pages are kept: $PDFCBZFS_CACHE, else the
+// user cache directory, else the temp directory.
+func renderCacheDir() string {
+	if d := os.Getenv("PDFCBZFS_CACHE"); d != "" {
+		return d
+	}
+	if d, err := os.UserCacheDir(); err == nil {
+		return d + "/pdfcbzfs"
+	}
+	return os.TempDir() + "/pdfcbzfs-cache"
+}
+
+// renderCacheMax is the cache size limit in bytes ($PDFCBZFS_CACHE_MB, default 2048).
+func renderCacheMax() int64 {
+	if mb, err := strconv.Atoi(os.Getenv("PDFCBZFS_CACHE_MB")); err == nil && mb > 0 {
+		return int64(mb) << 20
+	}
+	return 2048 << 20
 }
 
 // healStaleMount detaches the dead FUSE mount that a killed predecessor (OOM,

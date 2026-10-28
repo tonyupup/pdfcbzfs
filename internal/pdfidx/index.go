@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +26,32 @@ type Page struct {
 
 	png     *pngSpec
 	inflate bool // JPEG stored under an extra Flate layer (/Filter [Flate DCT])
+
+	// Render is set for a page that has no extractable image (text, several
+	// images, JPEG 2000, ...): a renderer draws it, and Size is a fixed byte
+	// budget the rendered JPEG is padded to, so the archive size stays known.
+	Render *RenderInfo
+}
+
+// RenderInfo describes a page that has to be drawn by a renderer.
+type RenderInfo struct {
+	Index  int    // 0-based position of the page in the document
+	W, H   int    // expected pixel size at RenderDPI / RenderMaxSide
+	Reason string // why the page could not be extracted
+}
+
+// Rendering parameters. They are part of the byte budget, so they must not
+// change without invalidating caches (the render cache key includes them).
+const (
+	RenderDPI     = 150
+	RenderMaxSide = 2400
+)
+
+// Options tunes Open.
+type Options struct {
+	// Render makes pages that cannot be extracted renderable instead of
+	// failing the whole document.
+	Render bool
 }
 
 // Index is the result of scanning a PDF. It is safe for concurrent use.
@@ -33,7 +61,46 @@ type Index struct {
 	// out because the object is missing or its xref entry is wrong.
 	Skipped []int
 
-	crypt *crypt
+	crypt    *crypt
+	password []byte // the password that opened the file (nil: empty password)
+
+	renderFn func(page int) ([]byte, error)
+}
+
+// SetRenderer installs the function that draws render pages: it must return
+// exactly Pages[page].Size bytes (a JPEG padded to the budget).
+func (x *Index) SetRenderer(fn func(page int) ([]byte, error)) { x.renderFn = fn }
+
+// Password is the password that opened the document, for the renderer.
+func (x *Index) Password() []byte { return x.password }
+
+// RenderPages counts the pages that need the renderer, and the first of them.
+func (x *Index) RenderPages() (n, first int) {
+	first = -1
+	for i := range x.Pages {
+		if x.Pages[i].Render != nil {
+			if first < 0 {
+				first = i
+			}
+			n++
+		}
+	}
+	return n, first
+}
+
+// ReadParallelism lets a caller that reads every page (the zip CRC pass) run
+// several reads at once when pages are rendered, which is CPU-bound.
+func (x *Index) ReadParallelism() int {
+	if n, _ := x.RenderPages(); n > 0 {
+		return min(2, max(1, runtime.NumCPU()))
+	}
+	return 1
+}
+
+// RenderedPage returns the bytes of a render page (also used as a probe).
+func (x *Index) RenderedPage(page int) ([]byte, error) {
+	b, err := x.image(nil, page)
+	return b, err
 }
 
 // Encrypted reports whether image reads go through a decryption step.
@@ -43,6 +110,11 @@ func (x *Index) Encrypted() bool { return x.crypt != nil && !x.crypt.identity() 
 // Open scans the PDF. passwords are tried (as user, then owner password) after
 // the empty password. It never reads more than the structural objects.
 func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) {
+	return OpenWith(r, size, Options{}, passwords...)
+}
+
+// OpenWith is Open with options.
+func OpenWith(r io.ReaderAt, size int64, o Options, passwords ...[]byte) (x *Index, err error) {
 	defer func() {
 		if e := recover(); e != nil {
 			x, err = nil, unsupported("parser panic: %v", e)
@@ -72,8 +144,11 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 		return nil, unsupported("no catalog")
 	}
 	x = &Index{crypt: d.crypt}
-	w := &walker{d: d, seen: map[int]bool{}}
-	x.Pages, err = w.node(root["Pages"], nil, 0)
+	if d.crypt != nil {
+		x.password = d.crypt.password
+	}
+	w := &walker{d: d, seen: map[int]bool{}, render: o.Render}
+	x.Pages, err = w.node(root["Pages"], inherited{}, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +164,16 @@ func Open(r io.ReaderAt, size int64, passwords ...[]byte) (x *Index, err error) 
 		sort.Ints(w.skipped)
 		x.Skipped = w.skipped
 	}
+	for i := range x.Pages {
+		if ri := x.Pages[i].Render; ri != nil {
+			if len(x.Skipped) > 0 {
+				// the renderer counts pages itself; with missing page
+				// objects its numbering could differ from ours
+				return nil, unsupported("cannot render a document with missing page objects")
+			}
+			ri.Index = i
+		}
+	}
 	return x, nil
 }
 
@@ -98,6 +183,7 @@ type walker struct {
 	mu      sync.Mutex
 	seen    map[int]bool
 	skipped []int
+	render  bool
 
 	inflated atomic.Int64 // compressed bytes read to size Flate-wrapped JPEGs
 }
@@ -111,7 +197,10 @@ const maxInflateIndex = 256 << 20
 // network filesystem the round trips dominate.
 const walkers = 16
 
-func (w *walker) node(v any, res any, depth int) ([]Page, error) {
+// inherited holds the page attributes a /Pages node passes down to its kids.
+type inherited struct{ res, media, crop, rotate any }
+
+func (w *walker) node(v any, inh inherited, depth int) ([]Page, error) {
 	if depth > 64 {
 		return nil, unsupported("page tree too deep")
 	}
@@ -133,8 +222,10 @@ func (w *walker) node(v any, res any, depth int) ([]Page, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r, ok := dc["Resources"]; ok {
-		res = r
+	for k, dst := range map[string]*any{"Resources": &inh.res, "MediaBox": &inh.media, "CropBox": &inh.crop, "Rotate": &inh.rotate} {
+		if r, ok := dc[k]; ok {
+			*dst = r
+		}
 	}
 	if kids, ok := dc["Kids"]; ok && name2(dc["Type"]) != "Page" {
 		ka, err := w.d.deref(kids)
@@ -145,19 +236,22 @@ func (w *walker) node(v any, res any, depth int) ([]Page, error) {
 		if !ok {
 			return nil, unsupported("bad /Kids")
 		}
-		return w.kids(arr, res, depth)
+		return w.kids(arr, inh, depth)
 	}
-	pg, err := w.page(dc, res)
+	pg, err := w.page(dc, inh.res)
 	if err != nil {
 		if r, ok := v.(ref); ok {
 			err = fmt.Errorf("page object %d: %w", r.num, err)
+		}
+		if w.render && errors.Is(err, ErrUnsupported) && !errors.Is(err, errDangling) {
+			return []Page{w.renderPage(dc, inh, err)}, nil
 		}
 		return nil, err
 	}
 	return []Page{pg}, nil
 }
 
-func (w *walker) kids(arr array, res any, depth int) ([]Page, error) {
+func (w *walker) kids(arr array, inh inherited, depth int) ([]Page, error) {
 	results := make([][]Page, len(arr))
 	errs := make([]error, len(arr))
 	n := walkers
@@ -177,7 +271,7 @@ func (w *walker) kids(arr array, res any, depth int) ([]Page, error) {
 							errs[i] = unsupported("parser panic: %v", e)
 						}
 					}()
-					results[i], errs[i] = w.node(arr[i], res, depth+1)
+					results[i], errs[i] = w.node(arr[i], inh, depth+1)
 				}()
 			}
 		}()
@@ -335,7 +429,7 @@ func (x *Index) ReadImageAt(r io.ReaderAt, page int, p []byte, off int64) (int, 
 	if off >= pg.Size {
 		return 0, io.EOF
 	}
-	if !x.Encrypted() && pg.png == nil && !pg.inflate {
+	if !x.Encrypted() && pg.png == nil && !pg.inflate && pg.Render == nil {
 		want := int64(len(p))
 		short := false
 		if want > pg.Size-off {
@@ -363,6 +457,20 @@ func (x *Index) image(r io.ReaderAt, page int) ([]byte, error) {
 		return b, nil
 	}
 	pg := x.Pages[page]
+	if pg.Render != nil {
+		if x.renderFn == nil {
+			return nil, fmt.Errorf("pdfidx: page %d needs a renderer", page)
+		}
+		b, err := x.renderFn(page)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(b)) != pg.Size {
+			return nil, fmt.Errorf("pdfidx: rendered page is %d bytes, budget %d", len(b), pg.Size)
+		}
+		imgs.put(x, page, b)
+		return b, nil
+	}
 	if pg.Len > maxStreamBytes {
 		return nil, fmt.Errorf("pdfidx: image too large")
 	}
@@ -823,4 +931,94 @@ func jpegHasAdobe(read func(off int64, n int) ([]byte, error), total int64) (boo
 		pos += 2 + n
 	}
 	return false, nil
+}
+
+// renderPage turns a page that cannot be extracted into a render page, sized
+// from its boxes (CropBox within MediaBox, /Rotate, /UserUnit).
+func (w *walker) renderPage(pd dict, inh inherited, why error) Page {
+	wpt, hpt := w.pageSize(pd, inh)
+	pw, ph := renderPixels(wpt, hpt)
+	reason := why.Error()
+	if len(reason) > 300 {
+		reason = reason[:300]
+	}
+	return Page{Ext: "jpg", Size: renderBudget(pw, ph), Render: &RenderInfo{W: pw, H: ph, Reason: reason}}
+}
+
+func (w *walker) box(v any) (x0, y0, x1, y1 float64, ok bool) {
+	a, _ := w.d.deref(v)
+	arr, _ := a.(array)
+	if len(arr) != 4 {
+		return
+	}
+	var f [4]float64
+	for i := range f {
+		n, err := w.d.deref(arr[i])
+		if err != nil {
+			return
+		}
+		switch t := n.(type) {
+		case int64:
+			f[i] = float64(t)
+		case float64:
+			f[i] = t
+		default:
+			return
+		}
+	}
+	x0, x1 = min(f[0], f[2]), max(f[0], f[2])
+	y0, y1 = min(f[1], f[3]), max(f[1], f[3])
+	return x0, y0, x1, y1, x1 > x0 && y1 > y0
+}
+
+// pageSize is the visible page size in points.
+func (w *walker) pageSize(pd dict, inh inherited) (wpt, hpt float64) {
+	x0, y0, x1, y1, ok := w.box(inh.media)
+	if !ok {
+		x0, y0, x1, y1 = 0, 0, 612, 792
+	}
+	if cx0, cy0, cx1, cy1, ok := w.box(inh.crop); ok {
+		x0, y0, x1, y1 = max(x0, cx0), max(y0, cy0), min(x1, cx1), min(y1, cy1)
+		if x1 <= x0 || y1 <= y0 {
+			x0, y0, x1, y1, _ = w.box(inh.crop)
+		}
+	}
+	wpt, hpt = x1-x0, y1-y0
+	if v, err := w.d.deref(inh.rotate); err == nil {
+		if r, ok := v.(int64); ok && (r/90)%2 != 0 {
+			wpt, hpt = hpt, wpt
+		}
+	}
+	if v, err := w.d.deref(pd["UserUnit"]); err == nil {
+		switch u := v.(type) {
+		case float64:
+			if u > 0 && u < 100 {
+				wpt, hpt = wpt*u, hpt*u
+			}
+		case int64:
+			if u > 0 && u < 100 {
+				wpt, hpt = wpt*float64(u), hpt*float64(u)
+			}
+		}
+	}
+	return wpt, hpt
+}
+
+// renderPixels is the pixel size the helper draws a wpt x hpt page at: the
+// same rule as pdfcbzfs-render (RenderDPI, reduced to fit RenderMaxSide).
+func renderPixels(wpt, hpt float64) (w, h int) {
+	scale := float64(RenderDPI) / 72
+	if longest := max(wpt, hpt) * scale; longest > RenderMaxSide {
+		scale *= RenderMaxSide / longest
+	}
+	return max(1, int(math.Round(wpt*scale))), max(1, int(math.Round(hpt*scale)))
+}
+
+// renderBudget is the exact size of every rendered page's JPEG: the encoder
+// picks a quality that fits and pads the rest, so the archive layout never
+// depends on what a page looks like.
+func renderBudget(w, h int) int64 {
+	b := int64(float64(w) * float64(h) * 0.12)
+	b = max(b, 48<<10)
+	return (b + 1023) &^ 1023
 }

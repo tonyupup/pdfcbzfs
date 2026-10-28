@@ -180,6 +180,42 @@ func (p *Part) ensureCRC(r io.ReaderAt, i int) error {
 	return nil
 }
 
+// allCRCs makes sure every entry has its CRC. A source that says reads are
+// CPU-bound (rendered pages) lets several run at once; plain file reads stay
+// sequential, which is what slow disks want.
+func (p *Part) allCRCs(r io.ReaderAt) error {
+	par := 1
+	if ps, ok := p.src.(interface{ ReadParallelism() int }); ok {
+		par = ps.ReadParallelism()
+	}
+	if par <= 1 {
+		for i := range p.entries {
+			if err := p.ensureCRC(r, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	errs := make([]error, len(p.entries))
+	sem := make(chan struct{}, par)
+	var wg sync.WaitGroup
+	for i := range p.entries {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer func() { <-sem; wg.Done() }()
+			errs[i] = p.ensureCRC(r, i)
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *Part) header(r io.ReaderAt, i int) ([]byte, error) {
 	if err := p.ensureCRC(r, i); err != nil {
 		return nil, err
@@ -207,10 +243,8 @@ func (p *Part) getTail(r io.ReaderAt) ([]byte, error) {
 	if t != nil {
 		return t, nil
 	}
-	for i := range p.entries {
-		if err := p.ensureCRC(r, i); err != nil {
-			return nil, err
-		}
+	if err := p.allCRCs(r); err != nil {
+		return nil, err
 	}
 	b := make([]byte, 0, p.total-p.cdOff)
 	for i := range p.entries {

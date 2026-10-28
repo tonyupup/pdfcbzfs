@@ -29,11 +29,13 @@ The archive is an uncompressed (STORED) zip. Sizes are known up front, reads
 work at any offset, and CRC32s are computed lazily the first time an archive's
 headers are needed.
 
-Anything else (text/layered PDFs, pages with several images, CMYK without that Adobe
-inversion, other `/Decode` arrays, alpha/`/SMask`, JPEG 2000, 16-bit, CCITT Group 3 (`K >= 0`), JBIG2 and
-other filters, damaged files, wrong
-or missing password) is **passed through untouched** as a normal `.pdf`. Run
-with `-v` to see why a given PDF was passed through.
+Pages that cannot be extracted this way (text, layered or composite pages,
+several images, JPEG 2000, CMYK without that Adobe inversion, other `/Decode`
+arrays, alpha/`/SMask`, 16-bit, CCITT Group 3, JBIG2, ...) are **drawn by a
+renderer** when the `pdfcbzfs-render` helper is installed (see "Drawing pages"
+below); the pages next to them keep their original images. Without the helper,
+or for damaged files and a wrong or missing password, the PDF is **passed
+through untouched** as a normal `.pdf`. Run with `-v` to see why.
 
 A PDF with a `NAME.pdf.aria2` file beside it is an unfinished aria2 download:
 it is left alone (logged once) and probed as soon as the control file is gone.
@@ -54,6 +56,45 @@ the file), that page is left out of the CBZ and `-v` logs the object numbers.
 More than 3 pages (or 10% of the book) missing counts as a damaged file and
 the PDF is passed through. Junk before the `%PDF-` header and large padding
 after `%%EOF` are also accepted.
+
+## Drawing pages that cannot be extracted
+
+For a page without an extractable image, the daemon runs `pdfcbzfs-render`, a
+small C program around [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD
+licensed, prebuilt by bblanchon/pdfium-binaries), as a separate process, one
+per page. A page is drawn at 150 dpi (at most 2400 px on the long side), so a
+page costs about 0.2 to 0.4 s and some tens of MB, released when the process
+exits. Nothing needs to be configured: PDFs that need it are converted
+automatically as soon as the helper can be found, and fall back to plain PDFs
+when it cannot.
+
+* **Exact sizes without drawing anything.** Every drawn page becomes a JPEG of
+  a fixed byte budget derived from its pixel size. The encoder lowers the
+  quality until the page fits and pads the rest with JPEG comment segments, so
+  the CBZ layout is known up front like everywhere else. About half of a drawn
+  page's bytes are padding; it is still a normal JPEG.
+* **Cache.** Drawn pages are kept on disk (`$PDFCBZFS_CACHE`, default the user
+  cache directory, `$PDFCBZFS_CACHE_MB` limit, default 2048) and survive
+  restarts. Opening an archive for the first time draws all of its drawn pages
+  (two at a time, `$PDFCBZFS_RENDER_WORKERS`), so expect seconds to minutes for
+  a big book once; Kavita's scan does this for you.
+* **Failures are retried, not remembered.** The first drawn page of a PDF is
+  drawn while probing it; if that fails the PDF stays a plain `.pdf` and is
+  probed again after 30 s, 1 min, 2 min, ... (at most 15 min). A missing or
+  broken helper is re-checked with the same kind of backoff, so installing it
+  later is enough. A page that fails while being read is retried 3 times.
+* **Fonts.** PDFium uses the fonts embedded in the PDF. A PDF that relies on
+  fonts installed on the machine (rare for books) needs them in the container.
+* **Where the helper is looked up:** `$PDFCBZFS_RENDER_HELPER`, next to the
+  `pdfcbzfs` executable, `~/.local/pdfcbzfs/bin`, `/usr/local/lib/pdfcbzfs/bin`,
+  then `PATH`. It finds `libpdfium.so` in `../lib`.
+
+Release assets `pdfcbzfs-render-linux-{arm64,amd64}.tar.gz` contain
+`bin/pdfcbzfs-render`, `lib/libpdfium.so` and the licenses. Unpack them into
+the same prefix as the `pdfcbzfs` binary, e.g. `/opt/pdfcbzfs/bin/pdfcbzfs`
+next to `/opt/pdfcbzfs/bin/pdfcbzfs-render` and `/opt/pdfcbzfs/lib/libpdfium.so`.
+The helper needs glibc (PDFium is not built for musl: no Alpine). Build it
+yourself with `helper/build.sh arm64|amd64 OUTDIR`.
 
 ## Presentation
 

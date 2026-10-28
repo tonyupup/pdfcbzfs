@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
@@ -188,5 +189,104 @@ func TestExtensions(t *testing.T) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil || zr.File[0].Name != "0001.png" || zr.File[1].Name != "0002.jpg" {
 		t.Fatalf("err=%v names=%v", err, zr.File)
+	}
+}
+
+// slowSource reports that its reads are CPU-bound, so the CRC pass may run
+// several at once.
+type slowSource struct {
+	memSource
+	par    int
+	mu     sync.Mutex
+	active int
+	peak   int
+	fail   map[int]error
+}
+
+func (s *slowSource) ReadParallelism() int { return s.par }
+
+func (s *slowSource) ReadImageAt(r io.ReaderAt, page int, p []byte, off int64) (int, error) {
+	s.mu.Lock()
+	s.active++
+	s.peak = max(s.peak, s.active)
+	err := s.fail[page]
+	s.mu.Unlock()
+	time.Sleep(15 * time.Millisecond)
+	s.mu.Lock()
+	s.active--
+	s.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return s.memSource.ReadImageAt(r, page, p, off)
+}
+
+func TestCRCPassRunsInParallelWhenTheSourceAsksForIt(t *testing.T) {
+	src := &slowSource{memSource: images(12), par: 3}
+	var imgs []cbz.Img
+	for i := range src.imgs {
+		imgs = append(imgs, cbz.Img{Page: i, Size: int64(len(src.imgs[i]))})
+	}
+	p, err := cbz.NewPart(src, imgs, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// zip readers start with the central directory at the end of the file,
+	// which needs every CRC at once
+	tail := make([]byte, 100)
+	if _, err := p.ReadAt(nil, tail, p.Size()-100); err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, p.Size())
+	if n, err := p.ReadAt(nil, b, 0); n != len(b) {
+		t.Fatalf("read %d of %d: %v", n, len(b), err)
+	}
+	if src.peak < 2 || src.peak > 3 {
+		t.Fatalf("peak concurrency %d, want 2 or 3", src.peak)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range zr.File {
+		rc, _ := f.Open()
+		got, err := io.ReadAll(rc) // verifies the CRC the parallel pass computed
+		if err != nil || !bytes.Equal(got, src.imgs[i]) {
+			t.Fatalf("%s: err %v", f.Name, err)
+		}
+	}
+}
+
+func TestSequentialSourcesStaySequential(t *testing.T) {
+	src := &slowSource{memSource: images(8), par: 1}
+	var imgs []cbz.Img
+	for i := range src.imgs {
+		imgs = append(imgs, cbz.Img{Page: i, Size: int64(len(src.imgs[i]))})
+	}
+	p, _ := cbz.NewPart(src, imgs, nil, time.Now())
+	b := make([]byte, 100)
+	p.ReadAt(nil, b, p.Size()-100)
+	if src.peak != 1 {
+		t.Fatalf("a source that does not ask for parallel reads got %d at once", src.peak)
+	}
+}
+
+func TestParallelCRCPassReportsFailureAndRecovers(t *testing.T) {
+	boom := errors.New("renderer died")
+	src := &slowSource{memSource: images(6), par: 3, fail: map[int]error{4: boom}}
+	var imgs []cbz.Img
+	for i := range src.imgs {
+		imgs = append(imgs, cbz.Img{Page: i, Size: int64(len(src.imgs[i]))})
+	}
+	p, _ := cbz.NewPart(src, imgs, nil, time.Now())
+	b := make([]byte, 100)
+	if _, err := p.ReadAt(nil, b, p.Size()-100); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	src.mu.Lock()
+	src.fail = nil // the failure was transient
+	src.mu.Unlock()
+	if n, err := p.ReadAt(nil, b, p.Size()-100); n != 100 || err != nil {
+		t.Fatalf("after the failure went away: n %d err %v (a failed CRC must not be cached)", n, err)
 	}
 }

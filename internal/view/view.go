@@ -4,17 +4,21 @@
 package view
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/tonyupup/pdfcbzfs/internal/cbz"
 	"github.com/tonyupup/pdfcbzfs/internal/pdfidx"
+	"github.com/tonyupup/pdfcbzfs/internal/render"
 )
 
 type Mode string
@@ -25,10 +29,23 @@ const (
 	Flat   Mode = "flat"   // <= PagesPerCBZ pages: a single .cbz; more: "Name vNN.cbz" parts next to where the PDF was
 )
 
+// Renderer draws pages that cannot be extracted from their PDF. *render.Service
+// implements it.
+type Renderer interface {
+	Available() bool
+	Page(ctx context.Context, k render.PageKey) ([]byte, error)
+}
+
 type Config struct {
 	PagesPerCBZ int
 	Mode        Mode
 	Logf        func(format string, a ...any)
+	// Render, when set and available, lets PDFs with pages that cannot be
+	// extracted (text, several images, JPEG 2000) be converted by drawing
+	// those pages. Without it such PDFs are passed through.
+	Render Renderer
+	// Now is the clock (tests).
+	Now func() time.Time
 }
 
 // PDF is a convertible PDF and its virtual presentation.
@@ -127,6 +144,24 @@ type entry struct {
 	sig  string
 	once sync.Once
 	pdf  *PDF
+
+	// A failure that may go away (the renderer broke, a page would not draw)
+	// is probed again after a backoff instead of being remembered for good.
+	fails   int
+	retryAt atomic.Int64 // unix nanoseconds; 0: final
+}
+
+// transient marks a probe failure worth retrying later.
+type transient struct{ err error }
+
+func (t *transient) Error() string { return t.err.Error() }
+func (t *transient) Unwrap() error { return t.err }
+
+// probeBackoff is the wait before probing a PDF again after its n-th
+// transient failure.
+func probeBackoff(n int) time.Duration {
+	d := 30 * time.Second << min(max(n-1, 0), 5) // 30s, 1m, 2m, 4m, 8m, 16m
+	return min(d, 15*time.Minute)
 }
 
 func NewCache(cfg Config) *Cache {
@@ -138,6 +173,9 @@ func NewCache(cfg Config) *Cache {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	return &Cache{cfg: cfg, m: map[string]*entry{}}
 }
@@ -152,11 +190,18 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 	// itself is preallocated, so it looks complete but is not).
 	_, aerr := os.Stat(path + ".aria2")
 	partial := aerr == nil
-	sig := fmt.Sprintf("%d:%d:%d:%s:%t", st.Size, st.Mtim.Nano(), st.Ino, pwSig, partial)
+	rendering := c.cfg.Render != nil && c.cfg.Render.Available()
+	sig := fmt.Sprintf("%d:%d:%d:%s:%t:%t", st.Size, st.Mtim.Nano(), st.Ino, pwSig, partial, rendering)
 	c.mu.Lock()
 	e := c.m[path]
-	if e == nil || e.sig != sig {
+	switch {
+	case e == nil || e.sig != sig:
 		e = &entry{sig: sig}
+		c.m[path] = e
+	case e.retryAt.Load() != 0 && c.cfg.Now().UnixNano() >= e.retryAt.Load():
+		// retryAt is set (after fails) only by a failed probe, so reading it
+		// is safe while another goroutine may still be inside e.once.Do
+		e = &entry{sig: sig, fails: e.fails} // the backoff is over: probe again
 		c.m[path] = e
 	}
 	c.mu.Unlock()
@@ -165,8 +210,16 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 			c.cfg.Logf("pdf passthrough %s: download in progress (%s.aria2 exists)", path, path)
 			return
 		}
-		p, err := c.build(path, st)
+		p, err := c.build(path, st, rendering)
 		if err != nil {
+			var tr *transient
+			if errors.As(err, &tr) {
+				e.fails++
+				wait := probeBackoff(e.fails)
+				e.retryAt.Store(c.cfg.Now().Add(wait).UnixNano())
+				c.cfg.Logf("pdf passthrough %s: %v (trying again in %v)", path, err, wait)
+				return
+			}
 			c.cfg.Logf("pdf passthrough %s: %v", path, err)
 			return
 		}
@@ -194,15 +247,20 @@ func readPasswords(path string) [][]byte {
 	return out
 }
 
-func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
+func (c *Cache) build(path string, st *syscall.Stat_t, rendering bool) (*PDF, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	idx, err := pdfidx.Open(f, st.Size, readPasswords(path)...)
+	idx, err := pdfidx.OpenWith(f, st.Size, pdfidx.Options{Render: rendering}, readPasswords(path)...)
 	if err != nil {
 		return nil, err
+	}
+	if n, first := idx.RenderPages(); n > 0 {
+		if err := c.attachRenderer(idx, path, st, n, first); err != nil {
+			return nil, err
+		}
 	}
 	if len(idx.Skipped) > 0 {
 		c.cfg.Logf("pdf %s: skipped %d missing page object(s) %v", path, len(idx.Skipped), idx.Skipped)
@@ -243,4 +301,25 @@ func (c *Cache) build(path string, st *syscall.Stat_t) (*PDF, error) {
 		}
 	}
 	return p, nil
+}
+
+// attachRenderer connects the index's render pages to the renderer and draws
+// the first one right away. That proves the helper can open this file (right
+// password, not damaged beyond repair) before the PDF is hidden behind a CBZ;
+// the result is cached, so the page is not drawn twice.
+func (c *Cache) attachRenderer(idx *pdfidx.Index, path string, st *syscall.Stat_t, n, first int) error {
+	id := fmt.Sprintf("%d:%d:%d:%d", st.Dev, st.Ino, st.Size, st.Mtim.Nano())
+	idx.SetRenderer(func(i int) ([]byte, error) {
+		pg := idx.Pages[i]
+		return c.cfg.Render.Page(context.Background(), render.PageKey{
+			FileID: id, Path: path, Password: idx.Password(), Page: pg.Render.Index,
+			Budget: pg.Size, DPI: pdfidx.RenderDPI, MaxSide: pdfidx.RenderMaxSide,
+		})
+	})
+	if _, err := idx.RenderedPage(first); err != nil {
+		return &transient{fmt.Errorf("renderer cannot draw page %d: %w", first+1, err)}
+	}
+	c.cfg.Logf("pdf %s: %d of %d pages are drawn by the renderer (page %d: %s)",
+		path, n, len(idx.Pages), first+1, idx.Pages[first].Render.Reason)
+	return nil
 }

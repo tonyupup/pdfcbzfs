@@ -43,15 +43,26 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o dist/pdfcbzfs-linux-${{ matrix.goarch }} ./cmd/pdfcbzfs
           file dist/pdfcbzfs-linux-${{ matrix.goarch }} || true
           ls -l dist
+      # The renderer: a small C helper plus PDFium. Without it pages that
+      # cannot be extracted stay PDFs; with it they are drawn.
+      - name: Cross compiler for the arm64 helper
+        if: matrix.goarch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build render helper
+        run: sh helper/build.sh ${{ matrix.goarch }} dist
       - uses: actions/upload-artifact@v4
         with:
           name: pdfcbzfs-linux-${{ matrix.goarch }}
-          path: dist/pdfcbzfs-linux-${{ matrix.goarch }}
+          path: |
+            dist/pdfcbzfs-linux-${{ matrix.goarch }}
+            dist/pdfcbzfs-render-linux-${{ matrix.goarch }}.tar.gz
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/pdfcbzfs-linux-${{ matrix.goarch }}
+          files: |
+            dist/pdfcbzfs-linux-${{ matrix.goarch }}
+            dist/pdfcbzfs-render-linux-${{ matrix.goarch }}.tar.gz
 
   # Rolling pre-release: every push to master replaces the "latest" assets.
   latest:
@@ -76,4 +87,6 @@ jobs:
           name: latest (master ${{ github.sha }})
           prerelease: true
           body: Automatic build of master at ${{ github.sha }}. Use a v* release for a stable version.
-          files: dist/pdfcbzfs-linux-*
+          files: |
+            dist/pdfcbzfs-linux-*
+            dist/pdfcbzfs-render-linux-*.tar.gz
