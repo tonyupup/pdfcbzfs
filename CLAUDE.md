@@ -40,7 +40,16 @@ Files still downloading by aria2 have a zero-filled tail (`no startxref`); that 
 
 ## Deployment context
 
-Runs as a privileged sidecar next to Kavita on arm64 Kubernetes (the image must be glibc based and contain `pdfcbzfs`, `pdfcbzfs-render` and `lib/libpdfium.so`; give it a cache `emptyDir` and enough memory), FUSE mounted on a shared `emptyDir` with `mountPropagation: Bidirectional` (sidecar) / `HostToContainer` (app). Lower directory is an NFS PVC that aria2 also downloads into. Manga PDFs go to a Kavita Manga library; text PDFs stay PDFs for a Book library.
+Runs as a privileged sidecar next to Kavita on arm64 k3s (nodes alioth-1..4, `kubectl` works from the phone). Namespace `kavita`, Deployment `kavita` (containers `pdfcbzfs` + `kavita`, single replica). **Not managed by Flux** (Flux's only Kustomization `flux-system` tracks the Gitea repo `tony/k3s-gitops` and owns just the Ingress `kavita-traefik` of this namespace): change the Deployment with `kubectl patch`, never the Ingress. Back up first (`kubectl get deploy kavita -o yaml`), dry-run with `--dry-run=server`, `kubectl rollout undo` to go back.
+
+- Image `ghcr.io/tonyupup/pdfcbzfs:sha-<7 chars of the master commit>` (public package, built by CI for amd64+arm64; always pin the sha tag, nodes pull through the mirror `ghcr.dockerproxy.zltop.cn` configured in every node's `/etc/rancher/k3s/registries.yaml`). The image is Alpine/musl and carries `pdfcbzfs`, `pdfcbzfs-render` and `libpdfium.so`.
+- Args `/lower /cbz-out -f -v -o ro,allow_other,pages_per_cbz=200,pdf_mode=folder`; `/lower` is the NFS PVC `kavita-manga-doraemon` (ROX), `/cbz-out` an emptyDir with `mountPropagation: Bidirectional` shared with Kavita (`/manga2`, `HostToContainer`).
+- Render cache on the **NFS PVC `kavita-render-cache-nfs`** (4Gi, class `nfs-client`, RWX, reclaim `Retain`) mounted at `/cache`, `PDFCBZFS_CACHE_MB=3000`. The NFS server 172.18.0.1 is the router that also holds the manga and runs aria2 (slow spinning disk): cold reads of cached pages measured ~35 ms per file (~6 MB/s), writes ~7 MB/s. The user asked for NFS, not `local-path`. Resources: requests 100m/128Mi, limits 2 CPU / 768Mi (not yet load tested in the cluster).
+- Kavita's library scan reads every CBZ's central directory, which needs the CRC of every page, so a scan draws every not-yet-cached page of every book that needs rendering (CPU pegged at the 2 core limit while it runs). Reading an extracted-only volume costs nothing.
+- `kavita-config` is a `local-path` RWO PVC with node affinity: the pod is pinned to alioth-2. A mutating webhook adds `TZ=Asia/Shanghai` to every container; that is not in the Deployment.
+- Kavita is v0.9.1-era: libraries `教材` (/manga2/课本), `成人` (/manga2/adult), `哆啦A梦` (/manga2/general). Docs: wiki.kavitareader.com (Scanner, Metadata/Comics, Filtering). Its manga reader has no table of contents (the PDF reader does); `<SeriesGroup>` makes collections only when the library's "Manage Collections" is on.
+- Needs checking on the cluster before assuming: memory under load, whether the sidecar OOMs.
+
 
 ## Open ideas (nothing committed to)
 
