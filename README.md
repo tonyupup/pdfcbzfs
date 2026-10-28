@@ -101,8 +101,7 @@ yourself with `helper/build.sh arm64|amd64 OUTDIR`.
 CI builds a multi-arch (amd64, arm64) **Alpine** image with the daemon and the
 renderer (musl build of PDFium) and pushes it to `ghcr.io/tonyupup/pdfcbzfs`:
 `latest` follows master, `sha-XXXXXXX` is every master commit, `X.Y.Z` / `X.Y`
-come from `v*` tags. (A new ghcr package is private until you make it public
-or add an `imagePullSecret`.) The entrypoint is `pdfcbzfs`, so the pod only
+come from `v*` tags. The package is public. The entrypoint is `pdfcbzfs`, so the pod only
 passes arguments.
 
 ```yaml
@@ -158,7 +157,52 @@ RC4 (40/128-bit), AES-128 and AES-256 (R5/R6) are supported. A PDF protected
 by an empty user password opens with no setup. Otherwise put the password in
 `Book.pdf.passwd` next to it (first line; additional lines are extra
 candidates). Both user and owner passwords work. Changing the `.passwd` file
-re-probes the PDF. The `.passwd` file stays visible in the mount.
+re-probes the PDF. The `.passwd` file stays visible in the mount. To give a
+whole set of files a default password, use `[passwords]` in `.pdf2cbz.conf`
+(next section).
+
+## Configuration file: `.pdf2cbz.conf`
+
+Put a file called `.pdf2cbz.conf` in **any directory** of the mounted tree. It
+applies to that directory and everything below it; a file in a deeper
+directory overrides an outer one. It is a normal file of the directory (visible
+and editable through the mount) and a change is picked up within a few
+seconds, without a restart. Lines starting with `#` are comments.
+
+```ini
+[ignore]                      # PDFs that must not be converted: they stay plain PDFs
+*.draft.pdf                   # wildcards
+课本/                          # a whole directory
+!keep.pdf                     # except this one
+
+[passwords]                   # default passwords: pattern = password
+课本/*.pdf = 123456
+scan-[0-9]*.pdf = my secret
+"a=b*.pdf" = "  with spaces  "
+```
+
+Patterns work like `.gitignore` and ignore case:
+
+| Pattern | Matches |
+| --- | --- |
+| `*` `?` `[0-9]` | any characters (never `/`), one character, a character class |
+| `name` | a file or directory called `name` at any depth |
+| `/name`, `dir/name` | relative to the directory holding the config file |
+| `name/` | a directory only, and so everything below it |
+| `**` | any number of directories: `a/**/b.pdf`, `old/**` |
+| `!pattern` | (`[ignore]` only) re-include; a file below an excluded directory cannot be re-included |
+| `\#name`, `\!name` | a name that really starts with `#` or `!` |
+
+In `[passwords]` the text before the first `=` is the pattern, the rest is the
+password (spaces inside are kept; double quotes keep leading and trailing
+spaces, and let a pattern contain `=`). Every matching password is tried, the
+innermost file first and later lines first, after the one in `NAME.pdf.passwd`;
+both user and owner passwords work. The passwords are stored in plain text, so
+treat the file like `.passwd`, and they are never written to the log.
+
+With `-v` an excluded PDF is logged with the file, section and line that
+excluded it; lines that cannot be understood are logged and skipped. Lines
+outside a known section are skipped too.
 
 ## Usage
 

@@ -36,6 +36,9 @@ func New(lower string, cfg view.Config) (*FS, error) {
 	if err := syscall.Stat(lower, &st); err != nil {
 		return nil, err
 	}
+	if cfg.Root == "" {
+		cfg.Root = lower
+	}
 	f := &FS{Lower: lower, cache: view.NewCache(cfg)}
 	f.loop = &fs.LoopbackRoot{Path: lower, Dev: uint64(st.Dev)}
 	f.loop.NewNode = func(rd *fs.LoopbackRoot, _ *fs.Inode, _ string, _ *syscall.Stat_t) fs.InodeEmbedder {

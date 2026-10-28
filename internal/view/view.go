@@ -5,6 +5,8 @@ package view
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -44,6 +46,9 @@ type Config struct {
 	// extracted (text, several images, JPEG 2000) be converted by drawing
 	// those pages. Without it such PDFs are passed through.
 	Render Renderer
+	// Root is the mounted directory; when set, .pdf2cbz.conf files from Root
+	// down to a PDF's directory can exclude it or give it default passwords.
+	Root string
 	// Now is the clock (tests).
 	Now func() time.Time
 }
@@ -135,9 +140,10 @@ func (p *PDF) Gen() uint64 {
 // Cache probes PDFs and remembers the result (including "not convertible")
 // until the file or its .passwd changes.
 type Cache struct {
-	cfg Config
-	mu  sync.Mutex
-	m   map[string]*entry
+	cfg  Config
+	conf *dirConfig
+	mu   sync.Mutex
+	m    map[string]*entry
 }
 
 type entry struct {
@@ -177,7 +183,7 @@ func NewCache(cfg Config) *Cache {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Cache{cfg: cfg, m: map[string]*entry{}}
+	return &Cache{cfg: cfg, conf: newDirConfig(cfg.Root, cfg.Now, cfg.Logf), m: map[string]*entry{}}
 }
 
 // Probe returns the PDF view, or nil if the file must be passed through.
@@ -191,7 +197,10 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 	_, aerr := os.Stat(path + ".aria2")
 	partial := aerr == nil
 	rendering := c.cfg.Render != nil && c.cfg.Render.Available()
-	sig := fmt.Sprintf("%d:%d:%d:%s:%t:%t", st.Size, st.Mtim.Nano(), st.Ino, pwSig, partial, rendering)
+	ignored, why, dirPw := c.conf.lookup(path)
+	// the sig covers everything that decides the outcome, so editing a config
+	// file (or the .passwd file) makes the PDF be probed again at once
+	sig := fmt.Sprintf("%d:%d:%d:%s:%t:%t:%t:%s", st.Size, st.Mtim.Nano(), st.Ino, pwSig, partial, rendering, ignored, passwordsSig(dirPw))
 	c.mu.Lock()
 	e := c.m[path]
 	switch {
@@ -206,11 +215,15 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 	}
 	c.mu.Unlock()
 	e.once.Do(func() {
+		if ignored {
+			c.cfg.Logf("pdf passthrough %s: excluded by %s", path, why)
+			return
+		}
 		if partial {
 			c.cfg.Logf("pdf passthrough %s: download in progress (%s.aria2 exists)", path, path)
 			return
 		}
-		p, err := c.build(path, st, rendering)
+		p, err := c.build(path, st, rendering, dirPw)
 		if err != nil {
 			var tr *transient
 			if errors.As(err, &tr) {
@@ -247,13 +260,13 @@ func readPasswords(path string) [][]byte {
 	return out
 }
 
-func (c *Cache) build(path string, st *syscall.Stat_t, rendering bool) (*PDF, error) {
+func (c *Cache) build(path string, st *syscall.Stat_t, rendering bool, dirPw [][]byte) (*PDF, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	idx, err := pdfidx.OpenWith(f, st.Size, pdfidx.Options{Render: rendering}, readPasswords(path)...)
+	idx, err := pdfidx.OpenWith(f, st.Size, pdfidx.Options{Render: rendering}, append(readPasswords(path), dirPw...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -322,4 +335,15 @@ func (c *Cache) attachRenderer(idx *pdfidx.Index, path string, st *syscall.Stat_
 	c.cfg.Logf("pdf %s: %d of %d pages are drawn by the renderer (page %d: %s)",
 		path, n, len(idx.Pages), first+1, idx.Pages[first].Render.Reason)
 	return nil
+}
+
+// passwordsSig identifies a list of candidate passwords without keeping them
+// in the probe signature.
+func passwordsSig(pws [][]byte) string {
+	h := sha1.New()
+	for _, p := range pws {
+		h.Write(p)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

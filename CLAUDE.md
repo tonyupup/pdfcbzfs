@@ -8,7 +8,7 @@ The maintainer writes in Chinese: reply in Chinese, commit messages are Chinese 
 
 - `cmd/pdfcbzfs` — libfuse-style CLI: `pdfcbzfs LOWER MOUNTPOINT [-o opts] [-f] [-d] [-v]`; daemonizes unless `-f`; heals a stale (dead) FUSE mount at start.
 - `internal/pdfidx` — PDF indexer (pread only, no whole-file load): xref tables/streams, object streams, page tree, RC4/AES-128/AES-256, image classification, PNG synthesis, CCITT G4 via `x/image/ccitt`.
-- `internal/view` — presentation: modes `auto|flat|folder`, part naming, `ComicInfo.xml`, probe cache (also skips PDFs with a `.aria2` control file), stable virtual inodes.
+- `internal/view` — presentation (also `config.go`: per-directory `.pdf2cbz.conf` with `[ignore]` and `[passwords]` sections, gitignore-style wildcards, inner files override outer ones, re-read every 2 s; it is part of the probe signature so edits re-probe at once; passwords never go into logs): modes `auto|flat|folder`, part naming, `ComicInfo.xml`, probe cache (also skips PDFs with a `.aria2` control file), stable virtual inodes.
 - `internal/render` — draws pages through the `pdfcbzfs-render` helper: service (health + backoff, retries, singleflight, worker cap), exact-size JPEG fitting, disk cache. `helper/` holds the C helper and `build.sh` (PDFium prebuilt, pinned release).
 - `internal/cbz` — STORED zip writer with sizes known up front, lazy CRC32.
 - `internal/fusefs` — go-fuse layer, NFS-export friendly (stable node IDs, `LookupNode`).
