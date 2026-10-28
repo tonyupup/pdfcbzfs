@@ -60,6 +60,9 @@ type Index struct {
 	// Skipped lists the object numbers of page-tree entries that were left
 	// out because the object is missing or its xref entry is wrong.
 	Skipped []int
+	// Repaired counts xref offsets that were wrong and had to be found by
+	// looking near the recorded position.
+	Repaired int
 
 	crypt    *crypt
 	password []byte // the password that opened the file (nil: empty password)
@@ -164,6 +167,7 @@ func OpenWith(r io.ReaderAt, size int64, o Options, passwords ...[]byte) (x *Ind
 		sort.Ints(w.skipped)
 		x.Skipped = w.skipped
 	}
+	x.Repaired = int(d.repairs.Load())
 	for i := range x.Pages {
 		if ri := x.Pages[i].Render; ri != nil {
 			if len(x.Skipped) > 0 {

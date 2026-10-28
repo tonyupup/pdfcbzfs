@@ -275,6 +275,9 @@ func (c *Cache) build(path string, st *syscall.Stat_t, rendering bool, dirPw [][
 			return nil, err
 		}
 	}
+	if idx.Repaired > 0 {
+		c.cfg.Logf("pdf %s: xref table is off, repaired %d offset(s)", path, idx.Repaired)
+	}
 	if len(idx.Skipped) > 0 {
 		c.cfg.Logf("pdf %s: skipped %d missing page object(s) %v", path, len(idx.Skipped), idx.Skipped)
 	}

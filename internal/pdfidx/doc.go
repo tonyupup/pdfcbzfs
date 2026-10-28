@@ -54,6 +54,8 @@ type doc struct {
 
 	mu     sync.Mutex
 	objstm map[int]*objStm
+
+	repairState // xref offsets that are a little off (see repair.go)
 }
 
 func (d *doc) readAt(off int64, n int) ([]byte, error) {
@@ -181,7 +183,27 @@ func (d *doc) resolve(num int) (o any, gen int, streamOff int64, objNum int, err
 	}
 	switch e.typ {
 	case 1:
-		n, g, v, so, err := d.readObjAt(e.a)
+		off := e.a
+		if fixed, ok := d.fixedOffset(num); ok && fixed >= 0 {
+			off = fixed
+		}
+		n, g, v, so, err := d.readObjAt(off)
+		if (err != nil || n != num) && off == e.a {
+			// the table may be a little off: look near the recorded position
+			if _, tried := d.fixedOffset(num); !tried {
+				if found, ok := d.findObject(num, e.a); ok {
+					if n2, g2, v2, so2, err2 := d.readObjAt(found); err2 == nil && n2 == num {
+						n, g, v, so, err = n2, g2, v2, so2, nil
+						d.setFixed(num, found)
+						d.learnShift(e.a, found)
+						d.repairs.Add(1)
+					}
+				}
+				if err != nil || n != num {
+					d.setFixed(num, -1) // do not search again
+				}
+			}
+		}
 		if err != nil {
 			if errors.Is(err, ErrUnsupported) {
 				err = fmt.Errorf("%w: %w: object %d at offset %d: %v", ErrUnsupported, errDangling, num, e.a, err)

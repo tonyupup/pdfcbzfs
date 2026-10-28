@@ -59,6 +59,15 @@ marked-content operators and one `Do`). A visible form, text, path, shading or
 a second image keeps the PDF unconverted; `-v` names the page object, what its
 resources hold and which operators blocked it.
 
+A wrong xref table is repaired: when a `startxref`, `/Prev` or object offset
+does not lead to what it names (bytes were inserted or removed after the table
+was written, so everything behind that point is recorded N bytes too early or
+late), the object is looked for within 8 KiB before and 64 KiB after the
+recorded position, and the shift found is tried first for the next object.
+Objects further away are not guessed at. `-v` logs `xref table is off,
+repaired N offset(s)`. Readers like Acrobat, pdf.js or PDFium do the same
+silently, which is why such files open fine there.
+
 A few damaged pages are tolerated: if a page object is missing from the file
 or its xref entry points at the wrong place (for example an ad page cut out of
 the file), that page is left out of the CBZ and `-v` logs the object numbers.

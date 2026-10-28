@@ -96,6 +96,21 @@ func (d *doc) merge(s *section) {
 }
 
 func (d *doc) readSection(off int64) (*section, error) {
+	sec, err := d.readSectionAt(off)
+	if err == nil {
+		return sec, nil
+	}
+	// a /Prev or startxref pointer that is slightly off: find the table nearby
+	if alt, ok := d.findXrefNear(off); ok && alt != off {
+		if sec2, err2 := d.readSectionAt(alt); err2 == nil {
+			d.repairs.Add(1)
+			return sec2, nil
+		}
+	}
+	return nil, err
+}
+
+func (d *doc) readSectionAt(off int64) (*section, error) {
 	head, err := d.readAt(off, 32)
 	if err != nil {
 		return nil, err
