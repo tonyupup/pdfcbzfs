@@ -96,6 +96,45 @@ next to `/opt/pdfcbzfs/bin/pdfcbzfs-render` and `/opt/pdfcbzfs/lib/libpdfium.so`
 The helper needs glibc (PDFium is not built for musl: no Alpine). Build it
 yourself with `helper/build.sh arm64|amd64 OUTDIR`.
 
+## Container image and Kubernetes sidecar
+
+CI builds a multi-arch (amd64, arm64) **Alpine** image with the daemon and the
+renderer (musl build of PDFium) and pushes it to `ghcr.io/tonyupup/pdfcbzfs`:
+`latest` follows master, `sha-XXXXXXX` is every master commit, `X.Y.Z` / `X.Y`
+come from `v*` tags. (A new ghcr package is private until you make it public
+or add an `imagePullSecret`.) The entrypoint is `pdfcbzfs`, so the pod only
+passes arguments.
+
+```yaml
+containers:
+  - name: pdfcbzfs
+    image: ghcr.io/tonyupup/pdfcbzfs:latest
+    args: ["/lower", "/cbz-out", "-f", "-v", "-o", "allow_other,pdf_mode=folder"]
+    securityContext: { privileged: true }          # mounts a FUSE filesystem
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: "2", memory: 512Mi }        # see below
+    volumeMounts:
+      - { name: manga, mountPath: /lower }         # the NFS / SeaweedFS PVC
+      - { name: cbz,   mountPath: /cbz-out, mountPropagation: Bidirectional }
+      - { name: cache, mountPath: /cache }         # drawn pages survive restarts
+  - name: kavita
+    volumeMounts:
+      - { name: cbz, mountPath: /manga, mountPropagation: HostToContainer }
+volumes:
+  - { name: manga, persistentVolumeClaim: { claimName: manga } }
+  - { name: cbz,   emptyDir: {} }
+  - { name: cache, emptyDir: { sizeLimit: 2Gi } }
+```
+
+Memory (measured on an arm64 phone, 8 cores): ~16 MB idle with a dozen PDFs
+listed; up to ~210 MB resident while a 166 MB book made of drawn pages is read
+from start to end, plus up to two renderer processes of ~40 MB each while pages
+are drawn. A 512Mi limit leaves room; drawing is CPU bound, so a low CPU limit
+makes the first open of a book of drawn pages slower, not wrong. If the
+container is killed and restarted, the dead mount it leaves is detached on the
+next start.
+
 ## Presentation
 
 Chosen with `-o pdf_mode=...`:
