@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -214,7 +215,7 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 		// content stream draws nothing else (the rest is never shown).
 		only, ok := w.soleDrawnImage(pd, xo)
 		if !ok {
-			return zero, unsupported("page needs exactly one XObject (%s)", w.describeXObjects(xo))
+			return zero, unsupported("page needs exactly one XObject (%s; %s)", w.describeXObjects(xo), w.describeContent(pd))
 		}
 		xo = only
 	}
@@ -520,45 +521,55 @@ func (w *walker) describeXObjects(xo dict) string {
 	return out
 }
 
-// soleDrawnImage returns the page's single image XObject when xo holds more
-// than one entry but the page content only places that image: no text, paths,
-// shadings, inline images, or any other XObject. Anything else (a visible
-// watermark form, a text layer) must keep the page unconvertible, since the
-// extracted image would not be the page.
+// soleDrawnImage returns the page's image when xo holds more than one entry
+// but the page content only places one image: a single Do naming an image,
+// and no text, paths, shadings, inline images or other XObjects. What the
+// resource dictionary lists does not matter (books often share one dictionary
+// of every image across many pages); what the content draws does. Anything
+// else, such as a visible watermark form or a text layer, keeps the page
+// unconvertible, since the extracted image would not be the page.
 func (w *walker) soleDrawnImage(pd dict, xo dict) (dict, bool) {
 	if len(xo) < 2 {
-		return nil, false
-	}
-	var imgName name
-	var imgVal any
-	for k, v := range xo {
-		r, ok := v.(ref)
-		if !ok {
-			return nil, false
-		}
-		o, _, _, _, err := w.d.resolve(r.num)
-		if err != nil {
-			return nil, false
-		}
-		if dd, ok := o.(dict); ok && name2(dd["Subtype"]) == "Image" {
-			if imgVal != nil {
-				return nil, false
-			}
-			imgName, imgVal = name(k), v
-		}
-	}
-	if imgVal == nil {
 		return nil, false
 	}
 	content, err := w.pageContent(pd)
 	if err != nil || len(content) == 0 {
 		return nil, false
 	}
-	do, ok := plainDraw(content)
-	if !ok || len(do) != 1 || do[0] != string(imgName) {
+	do, other, ok := scanContent(content)
+	if !ok || len(other) > 0 || len(do) != 1 {
 		return nil, false
 	}
-	return dict{string(imgName): imgVal}, true
+	v, listed := xo[do[0]]
+	r, isRef := v.(ref)
+	if !listed || !isRef {
+		return nil, false
+	}
+	o, _, _, _, err := w.d.resolve(r.num)
+	if err != nil {
+		return nil, false
+	}
+	if dd, ok := o.(dict); !ok || name2(dd["Subtype"]) != "Image" {
+		return nil, false
+	}
+	return dict{do[0]: v}, true
+}
+
+// describeContent says what a page's content stream draws, for the log.
+func (w *walker) describeContent(pd dict) string {
+	content, err := w.pageContent(pd)
+	if err != nil {
+		return "content unreadable"
+	}
+	do, other, ok := scanContent(content)
+	if !ok {
+		return "content not parseable"
+	}
+	out := fmt.Sprintf("content draws %d XObject(s)", len(do))
+	if len(other) > 0 {
+		out += ", other operators: " + strings.Join(other, " ")
+	}
+	return out
 }
 
 // pageContent returns the decoded, concatenated page content streams.
@@ -619,19 +630,21 @@ var harmlessOps = map[string]bool{
 	"BMC": true, "BDC": true, "EMC": true, "MP": true, "DP": true,
 }
 
-// plainDraw lists the XObject names a content stream invokes with Do, and
-// reports false if it uses any operator outside harmlessOps (apart from Do).
-func plainDraw(b []byte) (do []string, ok bool) {
+// scanContent lists the XObject names a content stream invokes with Do and
+// the distinct operators outside harmlessOps (at most 8, sorted). ok is false
+// when the stream cannot be tokenised.
+func scanContent(b []byte) (do, other []string, ok bool) {
 	p := &parser{b: append(append([]byte{}, b...), ' ')}
+	seen := map[string]bool{}
 	var last any
 	for {
 		p.skipWS()
 		if p.pos >= len(p.b)-1 {
-			return do, true
+			break
 		}
 		o, err := p.parseObject()
 		if err != nil {
-			return nil, false
+			return nil, nil, false
 		}
 		kw, isKw := o.(keyword)
 		if !isKw {
@@ -642,14 +655,22 @@ func plainDraw(b []byte) (do []string, ok bool) {
 		case kw == "Do":
 			n, isName := last.(name)
 			if !isName {
-				return nil, false
+				return nil, nil, false
 			}
 			do = append(do, string(n))
 		case !harmlessOps[string(kw)]:
-			return nil, false
+			seen[string(kw)] = true
 		}
 		last = nil
 	}
+	for k := range seen {
+		other = append(other, k)
+	}
+	sort.Strings(other)
+	if len(other) > 8 {
+		other = other[:8]
+	}
+	return do, other, true
 }
 
 // decodeArray interprets /Decode. Identity arrays are ignored; an inverting

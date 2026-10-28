@@ -37,6 +37,7 @@ type Opts struct {
 	WithContents bool   // every page gets a content stream that draws /Im0
 	FormPage     int    // 1-based page that also lists a Form XObject /Fm0
 	FormDrawn    bool   // ... and whose content stream invokes it
+	UnusedImage  int    // 1-based page whose resources also list a second image /Im1
 	PageExtra    string // appended to the content stream of FormPage (or page 1)
 }
 
@@ -102,8 +103,11 @@ func pageBody(parent, img int, extra bool) string {
 }
 
 // pageBodyEx is pageBody plus an optional /Contents and /Fm0 form.
-func pageBodyEx(parent, img, contents, form int) string {
+func pageBodyEx(parent, img, contents, form int, extraImg bool) string {
 	xo := fmt.Sprintf("/Im0 %d 0 R", img)
+	if extraImg {
+		xo += fmt.Sprintf(" /Im1 %d 0 R", img)
+	}
 	if form > 0 {
 		xo += fmt.Sprintf(" /Fm0 %d 0 R", form)
 	}
@@ -161,7 +165,7 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 				parent = l.tree[1]
 			}
 		}
-		if o.WithContents || o.FormPage > 0 {
+		if o.WithContents || o.FormPage > 0 || o.UnusedImage > 0 {
 			form, contents := 0, 0
 			if o.FormPage == i+1 {
 				form = formObj
@@ -172,12 +176,12 @@ func Classic(jpegs [][]byte, o Opts) []byte {
 				if form > 0 && o.FormDrawn {
 					c += "/Fm0 Do\n"
 				}
-				if o.FormPage == i+1 || (o.FormPage == 0 && i == 0) {
+				if extraPage := max(o.FormPage, o.UnusedImage); extraPage == i+1 || (extraPage == 0 && i == 0) {
 					c += o.PageExtra
 				}
 				b.stream(contents, "", []byte(c), 0)
 			}
-			b.obj(l.pageObj[i], pageBodyEx(parent, l.imgObj[i], contents, form))
+			b.obj(l.pageObj[i], pageBodyEx(parent, l.imgObj[i], contents, form, o.UnusedImage == i+1))
 		} else {
 			b.obj(l.pageObj[i], pageBody(parent, l.imgObj[i], o.ExtraImage == i+1))
 		}

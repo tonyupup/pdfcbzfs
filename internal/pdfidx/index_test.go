@@ -327,3 +327,30 @@ func TestVisibleExtrasKeepThePageUnconvertible(t *testing.T) {
 		}
 	}
 }
+
+func TestResourcesMayListImagesTheContentNeverDraws(t *testing.T) {
+	pdf, j := formPDF(t, testpdf.Opts{UnusedImage: 2})
+	x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Pages) != len(j) {
+		t.Fatalf("%d pages, want %d", len(x.Pages), len(j))
+	}
+}
+
+func TestContentDrawingSeveralImagesStaysUnconvertible(t *testing.T) {
+	pdf, _ := formPDF(t, testpdf.Opts{UnusedImage: 2, PageExtra: "/Im1 Do\n"})
+	_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if !errors.Is(err, pdfidx.ErrUnsupported) || !strings.Contains(err.Error(), "content draws 2 XObject(s)") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLogNamesTheOperatorsThatBlockAPage(t *testing.T) {
+	pdf, _ := formPDF(t, testpdf.Opts{FormPage: 2, PageExtra: "BT /F1 12 Tf (hi) Tj ET\n0 0 4 4 re f\n"})
+	_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err == nil || !strings.Contains(err.Error(), "other operators: BT ET Tf Tj f re") {
+		t.Fatalf("err = %v", err)
+	}
+}

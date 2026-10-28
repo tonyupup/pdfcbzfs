@@ -41,10 +41,12 @@ it is left alone (logged once) and probed as soon as the control file is gone.
 and masks; other arrays, or an inverted JPEG, are passed through and `-v`
 prints the array.
 
-A page may list extra XObjects (unused forms, stamps) as long as exactly one is
-an image and the page content only places that image (graphics state, colour
-and marked-content operators and one `Do`); a visible form, text, path or
-shading keeps the PDF unconverted. `-v` names the page object and what it holds.
+A page may list any number of XObjects (books often share one resource
+dictionary of every image across many pages) as long as its content stream
+draws exactly one, an image, and nothing else (only graphics state, colour and
+marked-content operators and one `Do`). A visible form, text, path, shading or
+a second image keeps the PDF unconverted; `-v` names the page object, what its
+resources hold and which operators blocked it.
 
 A few damaged pages are tolerated: if a page object is missing from the file
 or its xref entry points at the wrong place (for example an ad page cut out of
