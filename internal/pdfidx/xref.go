@@ -30,6 +30,13 @@ func (d *doc) loadXref() error {
 		}
 	}
 	if i < 0 {
+		last := tail
+		if len(last) > 2048 {
+			last = last[len(last)-2048:]
+		}
+		if len(bytes.Trim(last, "\x00")) == 0 {
+			return unsupported("no startxref: the end of the file is all zeros (incomplete or still downloading?)")
+		}
 		return unsupported("no startxref")
 	}
 	p := &parser{b: append(append([]byte{}, tail[i+9:]...), ' ')}

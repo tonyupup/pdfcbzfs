@@ -236,19 +236,9 @@ func (w *walker) page(pd dict, res any) (Page, error) {
 		return zero, unsupported("image filters %v", names)
 	}
 	mask := id["ImageMask"] == true
-	invert := false
-	if dec, ok := id["Decode"]; ok {
-		a, _ := dec.(array)
-		if !mask || len(a) != 2 {
-			return zero, unsupported("image has /Decode")
-		}
-		switch {
-		case numIs(a[0], 0) && numIs(a[1], 1):
-		case numIs(a[0], 1) && numIs(a[1], 0):
-			invert = true
-		default:
-			return zero, unsupported("image has /Decode")
-		}
+	invert, err := w.decodeArray(id, mask)
+	if err != nil {
+		return zero, err
 	}
 	if !mask {
 		for _, k := range []string{"SMask", "Mask"} {
@@ -623,4 +613,54 @@ func plainDraw(b []byte) (do []string, ok bool) {
 		}
 		last = nil
 	}
+}
+
+// decodeArray interprets /Decode. Identity arrays are ignored; an inverting
+// array ([1 0] per component) is returned as invert, which only raw-sample
+// (Flate/CCITT) gray and RGB images can honour. Anything else is unsupported,
+// and the message shows the array so the log says what the file holds.
+func (w *walker) decodeArray(id dict, mask bool) (invert bool, err error) {
+	dv, ok := id["Decode"]
+	if !ok {
+		return false, nil
+	}
+	a, _ := w.d.deref(dv)
+	arr, _ := a.(array)
+	bad := func() (bool, error) { return false, unsupported("image has /Decode %v", arr) }
+	if len(arr) == 0 || len(arr)%2 != 0 {
+		return bad()
+	}
+	identity, inverted := true, true
+	for i := 0; i < len(arr); i += 2 {
+		identity = identity && numIs(arr[i], 0) && numIs(arr[i+1], 1)
+		inverted = inverted && numIs(arr[i], 1) && numIs(arr[i+1], 0)
+	}
+	switch {
+	case identity:
+		return false, nil
+	case inverted && mask:
+		return true, nil
+	case inverted:
+		// only raw samples can be flipped; a JPEG would show inverted colours
+		if names, _, err := w.d.filters(id); err != nil || len(names) != 1 || (names[0] != "FlateDecode" && names[0] != "Fl" && names[0] != "CCITTFaxDecode" && names[0] != "CCF") {
+			return bad()
+		}
+		if cs, _ := w.d.deref(id["ColorSpace"]); cs != nil {
+			if ca, ok := cs.(array); ok && len(ca) > 0 && (name2(ca[0]) == "Indexed" || name2(ca[0]) == "I") {
+				return bad()
+			}
+		}
+		return true, nil
+	}
+	// Indexed images often carry the identity [0 2^bpc-1]
+	if len(arr) == 2 && numIs(arr[0], 0) {
+		if cs, _ := w.d.deref(id["ColorSpace"]); cs != nil {
+			if ca, ok := cs.(array); ok && len(ca) > 0 && (name2(ca[0]) == "Indexed" || name2(ca[0]) == "I") {
+				if bpc := intOf(id, "BitsPerComponent", 0); bpc >= 1 && bpc <= 8 && numIs(arr[1], 1<<bpc-1) {
+					return false, nil
+				}
+			}
+		}
+	}
+	return bad()
 }

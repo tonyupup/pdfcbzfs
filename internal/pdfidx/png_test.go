@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/tonyupup/pdfcbzfs/internal/pdfidx"
@@ -314,5 +315,87 @@ func TestCCITTTruncatedStreamPadsWhite(t *testing.T) {
 		if g.GrayAt(xx, ccH-1).Y != 255 {
 			t.Fatalf("missing last row must be white, got %d at x=%d", g.GrayAt(xx, ccH-1).Y, xx)
 		}
+	}
+}
+
+func TestDecodeArrays(t *testing.T) {
+	rgb := testpdf.RawImage(5, 20, 6, 8, "/DeviceRGB", 3)
+	gray := testpdf.RawImage(6, 21, 5, 8, "/DeviceGray", 1)
+	idx := testpdf.RawImage(7, 18, 4, 4, "[/Indexed /DeviceRGB 15 <"+hexPalette(16)+">]", 1)
+	for _, c := range []struct {
+		name   string
+		im     testpdf.Raw
+		decode string
+		invert bool
+		fail   string // substring of the expected error
+	}{
+		{"rgb identity", rgb, "[0 1 0 1 0 1]", false, ""},
+		{"gray identity", gray, "[0.0 1.0]", false, ""},
+		{"gray inverted", gray, "[1 0]", true, ""},
+		{"rgb inverted", rgb, "[1 0 1 0 1 0]", true, ""},
+		{"indexed identity", idx, "[0 15]", false, ""},
+		{"indexed inverted", idx, "[15 0]", false, "/Decode [15 0]"},
+		{"gray stretched", gray, "[0 0.5]", false, "/Decode [0 0.5]"},
+		{"odd length", gray, "[0 1 0]", false, "/Decode"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			im := c.im
+			im.Decode = c.decode
+			pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+			x, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+			if c.fail != "" {
+				if !errors.Is(err, pdfidx.ErrUnsupported) || !strings.Contains(err.Error(), c.fail) {
+					t.Fatalf("err = %v, want unsupported with %q", err, c.fail)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// the PNG must equal the PDF's samples, flipped when inverted
+			want := append([]byte{}, im.Rows...)
+			if c.invert {
+				for i := range want {
+					want[i] = ^want[i]
+				}
+			}
+			spec := testpdf.Raw{W: im.W, H: im.H, Bpc: im.Bpc, ColorSpace: im.ColorSpace, Rows: want}
+			ref := testpdf.ClassicRaw([]testpdf.Raw{spec})
+			xr, err := pdfidx.Open(bytes.NewReader(ref), int64(len(ref)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, exp := readPNGBytes(t, pdf, x), readPNGBytes(t, ref, xr)
+			if !bytes.Equal(got, exp) {
+				t.Fatal("PNG differs from the expected samples")
+			}
+		})
+	}
+}
+
+func readPNGBytes(t *testing.T, pdf []byte, x *pdfidx.Index) []byte {
+	t.Helper()
+	b := make([]byte, x.Pages[0].Size)
+	if n, _ := x.ReadImageAt(bytes.NewReader(pdf), 0, b, 0); int64(n) != x.Pages[0].Size {
+		t.Fatalf("short read %d of %d", n, x.Pages[0].Size)
+	}
+	return b
+}
+
+func TestInvertedDecodeOnJPEGIsUnsupported(t *testing.T) {
+	im := testpdf.Raw{W: 16, H: 16, Bpc: 8, ColorSpace: "/DeviceGray", Decode: "[1 0]",
+		Filter: "DCTDecode", Parms: "", Data: testpdf.JPEG(1, 16, 16)}
+	pdf := testpdf.ClassicRaw([]testpdf.Raw{im})
+	if _, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf))); err == nil || !strings.Contains(err.Error(), "/Decode [1 0]") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestZeroFilledTailIsExplained(t *testing.T) {
+	pdf := make([]byte, 8192)
+	copy(pdf, "%PDF-1.4\n")
+	_, err := pdfidx.Open(bytes.NewReader(pdf), int64(len(pdf)))
+	if err == nil || !strings.Contains(err.Error(), "all zeros") {
+		t.Fatalf("err = %v", err)
 	}
 }

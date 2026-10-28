@@ -1,8 +1,10 @@
 package view_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -142,5 +144,25 @@ func TestSplitPartName(t *testing.T) {
 		if b != c.base || n != c.n || ok != c.ok {
 			t.Errorf("%q = %q,%d,%v want %q,%d,%v", c.in, b, n, ok, c.base, c.n, c.ok)
 		}
+	}
+}
+
+func TestAria2PartialDownloadIsSkippedUntilFinished(t *testing.T) {
+	dir := t.TempDir()
+	var logs []string
+	c := view.NewCache(view.Config{Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }})
+	p, st := write(t, dir, "dl.pdf", pdf(3))
+	if err := os.WriteFile(p+".aria2", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c.Probe(p, st) != nil {
+		t.Fatal("a file with a .aria2 control file is still downloading")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "download in progress") {
+		t.Fatalf("logs = %q", logs)
+	}
+	os.Remove(p + ".aria2") // download finished; the PDF itself did not change
+	if c.Probe(p, st) == nil {
+		t.Fatal("must be probed once the control file is gone")
 	}
 }

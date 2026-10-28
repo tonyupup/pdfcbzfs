@@ -30,6 +30,12 @@ other filters, damaged files, wrong
 or missing password) is **passed through untouched** as a normal `.pdf`. Run
 with `-v` to see why a given PDF was passed through.
 
+A PDF with a `NAME.pdf.aria2` file beside it is an unfinished aria2 download:
+it is left alone (logged once) and probed as soon as the control file is gone.
+`/Decode` is honoured for identity arrays and for `[1 0]` on raw-sample gray/RGB
+and masks; other arrays, or an inverted JPEG, are passed through and `-v`
+prints the array.
+
 A page may list extra XObjects (unused forms, stamps) as long as exactly one is
 an image and the page content only places that image (graphics state, colour
 and marked-content operators and one `Do`); a visible form, text, path or

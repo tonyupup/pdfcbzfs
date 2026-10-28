@@ -148,7 +148,11 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 	if ps, err := os.Stat(path + ".passwd"); err == nil {
 		pwSig = fmt.Sprintf("%d:%d", ps.Size(), ps.ModTime().UnixNano())
 	}
-	sig := fmt.Sprintf("%d:%d:%d:%s", st.Size, st.Mtim.Nano(), st.Ino, pwSig)
+	// aria2 keeps NAME.aria2 beside a file it is still downloading (the file
+	// itself is preallocated, so it looks complete but is not).
+	_, aerr := os.Stat(path + ".aria2")
+	partial := aerr == nil
+	sig := fmt.Sprintf("%d:%d:%d:%s:%t", st.Size, st.Mtim.Nano(), st.Ino, pwSig, partial)
 	c.mu.Lock()
 	e := c.m[path]
 	if e == nil || e.sig != sig {
@@ -157,6 +161,10 @@ func (c *Cache) Probe(path string, st *syscall.Stat_t) *PDF {
 	}
 	c.mu.Unlock()
 	e.once.Do(func() {
+		if partial {
+			c.cfg.Logf("pdf passthrough %s: download in progress (%s.aria2 exists)", path, path)
+			return
+		}
 		p, err := c.build(path, st)
 		if err != nil {
 			c.cfg.Logf("pdf passthrough %s: %v", path, err)
